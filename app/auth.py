@@ -75,7 +75,7 @@ def login_required(fn):
 def login():
     d = request.get_json(force=True) or {}
     with db.tx() as c:
-        u = db.one(c, "SELECT * FROM app_user WHERE username=:u", u=(d.get("username") or "").strip())
+        u = db.one(c, "SELECT * FROM app_user WHERE username=:u OR email=:u", u=(d.get("username") or "").strip())
         pwd_match = u and ((u["password_hash"] == (d.get("password") or "")) or check_password_hash(u["password_hash"], d.get("password") or ""))
         if not u or not u["active"] or not pwd_match:
             raise ApiError("Wrong username or password", 401)
@@ -112,6 +112,36 @@ def change_password():
         db.run(c, "UPDATE app_user SET password_hash=:h WHERE id=:i", h=d["new_password"], i=u["id"])
     return jsonify({"ok": True})
 
+
+@bp.post("/auth/register")
+def register():
+    d = request.get_json(force=True) or {}
+    username = (d.get("username") or "").strip()
+    email = (d.get("email") or "").strip()
+    full_name = (d.get("full_name") or "").strip()
+    password = d.get("password") or ""
+    if not username or not full_name or not email or len(password) < 8:
+        raise ApiError("Username, email, full name, and a password of at least 8 characters are required")
+    with db.tx() as c:
+        if db.scalar(c, "SELECT COUNT(*) FROM app_user WHERE username=:u OR email=:e", u=username, e=email):
+            raise ApiError("That username or email is taken")
+        role_name = (d.get("role") or "").strip()
+        if role_name not in ["Sales & dispatch", "Stores & purchase"]:
+            raise ApiError("Invalid role selected")
+        role_id = db.scalar(c, "SELECT id FROM app_role WHERE name=:r", r=role_name)
+        if not role_id:
+            raise ApiError("Selected role does not exist in the database")
+        uid = db.insert(c, "app_user", {
+            "username": username,
+            "email": email,
+            "full_name": full_name,
+            "role_id": role_id,
+            "active": 1,
+            "password_hash": password
+        })
+        u = db.one(c, "SELECT * FROM app_user WHERE id=:i", i=uid)
+        db.run(c, "UPDATE app_user SET last_login=NOW() WHERE id=:i", i=uid)
+    return jsonify({"token": make_token(u), "user": me_payload(u["id"])})
 
 # ---- roles
 @bp.get("/roles")
