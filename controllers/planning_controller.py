@@ -1,22 +1,19 @@
 """Production planning (sales orders -> FG balance -> BOM material need -> requisition) and Requisition for PO."""
 from decimal import Decimal
 
-from flask import Blueprint, g, jsonify, request
+from flask import g, jsonify, request
 
-from . import db
-from .auth import require
-from .errors import ApiError
-from .stock import free_stock
-from .vouchers import D, PENDING_SQL, next_number
+from app import db
+from controllers.auth_controller import require
+from app.errors import ApiError
+from controllers.stock_controller import free_stock
+from controllers.vouchers_controller import D, PENDING_SQL, next_number
 
-bp = Blueprint("planning", __name__, url_prefix="/api")
 
 MAX_DEPTH = 5
 
-
 def _f(x):
     return float(D(x))
-
 
 def _pick_type(conn, kind, given=None):
     if given:
@@ -31,7 +28,6 @@ def _pick_type(conn, kind, given=None):
 def _po_pending(conn, pid):
     rows = db.all_(conn, PENDING_SQL.format(party=""), kind="purchase_order", excl=0)
     return sum(D(r["pending_qty"]) for r in rows if r["product_id"] == pid)
-
 
 def analyze(conn, order_ids):
     if not order_ids:
@@ -94,7 +90,6 @@ def analyze(conn, order_ids):
             "orders": sorted({(r["src_header_id"], r["src_no"]) for r in lines})}
 
 
-@bp.get("/planning/open-orders")
 @require("planning", "view")
 def open_orders():
     with db.tx() as conn:
@@ -113,7 +108,6 @@ def open_orders():
     return jsonify(list(by.values()))
 
 
-@bp.post("/planning/analyze")
 @require("planning", "view")
 def analyze_():
     with db.tx() as conn:
@@ -122,7 +116,6 @@ def analyze_():
     return jsonify(res)
 
 
-@bp.post("/planning")
 @require("planning", "create")
 def accept():
     d = request.get_json(force=True) or {}
@@ -159,7 +152,6 @@ def accept():
     return jsonify({"id": pid, "plan_no": plan_no, "requisition_no": req_no}), 201
 
 
-@bp.get("/planning")
 @require("planning", "view")
 def plans():
     with db.tx() as conn:
@@ -168,7 +160,6 @@ def plans():
                                      "FROM prod_plan p LEFT JOIN requisition r ON r.id=p.requisition_id ORDER BY p.id DESC LIMIT 200"))
 
 
-@bp.get("/planning/<int:pid>")
 @require("planning", "view")
 def plan_get(pid):
     with db.tx() as conn:
@@ -181,7 +172,6 @@ def plan_get(pid):
     return jsonify(p)
 
 
-@bp.post("/planning/<int:pid>/cancel")
 @require("planning", "delete")
 def plan_cancel(pid):
     with db.tx() as conn:
@@ -207,7 +197,6 @@ REQ_LIST = """SELECT r.id,r.req_no,r.req_date,r.source,r.status,r.remarks,p.plan
  FROM requisition r LEFT JOIN prod_plan p ON p.id=r.plan_id"""
 
 
-@bp.get("/requisitions")
 @require("requisition", "view")
 def req_list():
     st = request.args.get("status")
@@ -215,7 +204,6 @@ def req_list():
         return jsonify(db.all_(conn, REQ_LIST + (" WHERE r.status=:s" if st else "") + " ORDER BY r.id DESC LIMIT 200", **({"s": st} if st else {})))
 
 
-@bp.get("/requisitions/<int:rid>")
 @require("requisition", "view")
 def req_get(rid):
     with db.tx() as conn:
@@ -230,7 +218,6 @@ def req_get(rid):
     return jsonify(r)
 
 
-@bp.get("/requisitions/suggest")
 @require("requisition", "create")
 def req_suggest():
     """Items whose projected stock (free + open PO + open requisition) is below minimum level."""
@@ -249,7 +236,6 @@ def req_suggest():
                 out.append({"product_id": p["id"], "product_id__label": p["item_name"], "uom": p["uom"], "qty": _f(D(p["min_stock"]) - proj),
                             "remark": f"Min {p['min_stock']}, free {_f(free)}, on order {_f(po + max(rq, D(0)))}"})
     return jsonify(out)
-
 
 def _save_req(conn, payload, rid=None):
     items = [i for i in payload.get("items") or [] if i.get("product_id") and D(i.get("qty")) > 0]
@@ -275,7 +261,6 @@ def _save_req(conn, payload, rid=None):
     return rid
 
 
-@bp.post("/requisitions")
 @require("requisition", "create")
 def req_create():
     with db.tx() as conn:
@@ -283,7 +268,6 @@ def req_create():
     return req_get(rid)
 
 
-@bp.put("/requisitions/<int:rid>")
 @require("requisition", "edit")
 def req_update(rid):
     with db.tx() as conn:
@@ -291,7 +275,6 @@ def req_update(rid):
     return req_get(rid)
 
 
-@bp.post("/requisitions/<int:rid>/close")
 @require("requisition", "edit")
 def req_close(rid):
     with db.tx() as conn:
@@ -299,7 +282,6 @@ def req_close(rid):
     return jsonify({"ok": True})
 
 
-@bp.delete("/requisitions/<int:rid>")
 @require("requisition", "delete")
 def req_delete(rid):
     with db.tx() as conn:

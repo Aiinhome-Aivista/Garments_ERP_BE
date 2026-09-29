@@ -1,28 +1,23 @@
 """Barcode scan lookup and stock reports."""
-from flask import Blueprint, jsonify, request
+from flask import jsonify, request
 
-from . import db
-from .auth import login_required, require
+from app import db
+from controllers.auth_controller import login_required, require
 
-bp = Blueprint("stock", __name__, url_prefix="/api")
 
 PRODUCT_SQL = ("SELECT p.id product_id, p.item_name, p.gst_rate, p.barcode product_barcode, u.name uom, "
                "p.default_sales_ledger_id, p.default_purchase_ledger_id FROM m_product p JOIN m_uom u ON u.id=p.uom_id")
 
-
 def on_hand(conn, pid):
     return db.scalar(conn, "SELECT COALESCE(SUM(qty),0) FROM stock_ledger WHERE product_id=:p", p=pid)
 
-
 def reserved(conn, pid):
     return db.scalar(conn, "SELECT COALESCE(SUM(qty),0) FROM stock_reservation WHERE product_id=:p AND active=1", p=pid)
-
 
 def free_stock(conn, pid):
     return float(on_hand(conn, pid)) - float(reserved(conn, pid))
 
 
-@bp.get("/stock/scan/<code>")
 @login_required
 def scan(code):
     """Resolve a scanned code: a lot barcode (from GRN) or a product barcode (from the item master)."""
@@ -59,7 +54,6 @@ def scan(code):
     return jsonify({"kind": kind, "product": prod, "lots": lots, "ref_item": ref_item})
 
 
-@bp.get("/stock/report")
 @require("stock_report", "view")
 def report():
     a = request.args

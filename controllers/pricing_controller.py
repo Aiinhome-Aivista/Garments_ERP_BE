@@ -1,12 +1,10 @@
 """Resolve price list, rate and discount for a customer + item, using the customer's discount structure."""
 from decimal import Decimal
 
-from flask import Blueprint, jsonify, request
+from flask import jsonify, request
 
-from . import db
-from .auth import login_required
-
-bp = Blueprint("pricing", __name__, url_prefix="/api")
+from app import db
+from controllers.auth_controller import login_required
 
 
 def group_chain(conn, group_id):
@@ -16,7 +14,6 @@ def group_chain(conn, group_id):
         chain.append(group_id)
         group_id = db.scalar(conn, "SELECT parent_id FROM m_product_group WHERE id=:i", i=group_id)
     return chain            # nearest group first
-
 
 def resolve(conn, party_id, product_id, on_date):
     out = {"pricelist_id": None, "pricelist_label": None, "rate": 0, "disc_pct": 0, "disc_amt": 0, "customer_item_name": None}
@@ -49,7 +46,6 @@ def resolve(conn, party_id, product_id, on_date):
     return out
 
 
-@bp.get("/pricing/resolve")
 @login_required
 def resolve_():
     a = request.args
@@ -57,7 +53,6 @@ def resolve_():
         return jsonify(resolve(conn, a.get("party_id"), a.get("product_id"), a.get("date") or "9999-12-31"))
 
 
-@bp.get("/pricing/pricelist-rate")
 @login_required
 def pricelist_rate():
     a = request.args

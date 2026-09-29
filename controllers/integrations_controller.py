@@ -7,14 +7,12 @@ Names/codes in the payload are resolved to ids; documents land as *Pending* appr
 import hashlib
 from functools import wraps
 
-from flask import Blueprint, g, jsonify, request
+from flask import g, jsonify, request
 
-from . import db
-from .errors import ApiError
-from .pricing import resolve
-from .vouchers import PENDING_SQL, D, get_voucher, save_voucher
-
-bp = Blueprint("integrations", __name__, url_prefix="/api/integrations")
+from app import db
+from app.errors import ApiError
+from controllers.pricing_controller import resolve
+from controllers.vouchers_controller import PENDING_SQL, D, get_voucher, save_voucher
 
 
 def api_key_required(fn):
@@ -29,7 +27,6 @@ def api_key_required(fn):
         return fn(*a, **kw)
     return w
 
-
 def _ledger(conn, ref, types, what):
     if isinstance(ref, dict):
         row = db.one(conn, "SELECT id,ledger_type FROM m_ledger WHERE (gstin=:g AND :g IS NOT NULL AND :g<>'') OR name=:n LIMIT 1",
@@ -42,13 +39,11 @@ def _ledger(conn, ref, types, what):
         raise ApiError(f"{what} '{ref}' is a {row['ledger_type']} ledger")
     return row["id"]
 
-
 def _txn_type(conn, kind, name):
     row = db.one(conn, "SELECT id FROM m_txn_type WHERE txn_kind=:k AND active=1 AND (:n IS NULL OR name=:n) ORDER BY id LIMIT 1", k=kind, n=name)
     if not row:
         raise ApiError(f"No active transaction type for {kind}")
     return row["id"]
-
 
 def _product(conn, it):
     row = None
@@ -61,7 +56,6 @@ def _product(conn, it):
         raise ApiError(f"Item not found: {it.get('item_name') or it.get('barcode')}")
     return row["id"]
 
-
 def _common(conn, d, party_types):
     date = (d.get("date") or "")[:10] or db.scalar(conn, "SELECT CURDATE()")
     return {"party_id": _ledger(conn, d.get("party"), party_types, "Party"), "voucher_date": date,
@@ -71,7 +65,6 @@ def _common(conn, d, party_types):
                          "rate_in": l.get("rate_in", "value"), "rate_on": l.get("rate_on", "auto")} for l in d.get("ledgers", [])]}
 
 
-@bp.post("/sales-orders")
 @api_key_required
 def sales_order():
     d = request.get_json(force=True) or {}
@@ -99,7 +92,6 @@ def sales_order():
     return jsonify({"id": hid, "voucher_no": h["voucher_no"], "total_value": h["total_value"], "status": h["approval_status"]}), 201
 
 
-@bp.post("/packing-lists")
 @api_key_required
 def packing_list():
     d = request.get_json(force=True) or {}

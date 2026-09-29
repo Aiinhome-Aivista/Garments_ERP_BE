@@ -3,15 +3,13 @@ import datetime as dt
 import json
 from decimal import Decimal, InvalidOperation
 
-from flask import Blueprint, g, jsonify, request
+from flask import g, jsonify, request
 from sqlalchemy.exc import IntegrityError
 
-from . import db
-from .auth import login_required, require
-from .errors import ApiError
-from .registry import MASTERS, field_names, label_col
-
-bp = Blueprint("masters", __name__, url_prefix="/api")
+from app import db
+from controllers.auth_controller import login_required, require
+from app.errors import ApiError
+from app.registry import MASTERS, field_names, label_col
 
 
 def _m(key):
@@ -34,13 +32,11 @@ def _select(fields, table, hierarchical=False):
         cols.append("pp.name AS parent__label")
     return f"SELECT {', '.join(cols)} FROM `{table}` t {' '.join(joins)}"
 
-
 def _post(m, row):
     for f in m["fields"]:
         if f["type"] == "attrs" and isinstance(row.get(f["name"]), (str, bytes)):
             row[f["name"]] = json.loads(row[f["name"]])
     return row
-
 
 def _paths(conn, table):
     rows = db.all_(conn, f"SELECT id,name,parent_id FROM `{table}`")
@@ -75,7 +71,6 @@ def _filters(m, key):
                 p[k] = v
     return where, p
 
-
 def _query(key, limit=None, offset=0, lookup=False):
     m = _m(key)
     where, p = _filters(m, key)
@@ -103,7 +98,6 @@ def _query(key, limit=None, offset=0, lookup=False):
     return [_post(m, r) for r in rows], total
 
 
-@bp.get("/masters/<key>")
 @require(lambda kw: kw["key"], "view")
 def list_(key):
     page = max(int(request.args.get("page", 1)), 1)
@@ -113,7 +107,6 @@ def list_(key):
     return jsonify({"rows": rows, "total": total, "page": page, "page_size": size})
 
 
-@bp.get("/lookup/<key>")
 @login_required
 def lookup(key):
     lim = min(int(request.args.get("limit", 30)), 100)
@@ -146,7 +139,6 @@ def load_one(conn, key, rid):
     return row
 
 
-@bp.get("/masters/<key>/<int:rid>")
 @require(lambda kw: kw["key"], "view")
 def get_(key, rid):
     with db.tx() as c:
@@ -160,7 +152,6 @@ def _num(v, label, integer=False):
     except InvalidOperation:
         raise ApiError(f"{label} must be a number")
     return int(d) if integer else d
-
 
 def clean_fields(fields, data, label_prefix="", creating=True):
     out = {}
@@ -211,7 +202,6 @@ def _ean13(base12):
     s = sum(int(d) * (3 if i % 2 else 1) for i, d in enumerate(base12))
     return base12 + str((10 - s % 10) % 10)
 
-
 def _product_before(conn, data, payload, rid):
     cat = data.get("category_id")
     attrs = db.all_(conn, "SELECT attr_no,label FROM m_product_category_attr WHERE category_id=:c ORDER BY attr_no", c=cat)
@@ -227,18 +217,15 @@ def _product_before(conn, data, payload, rid):
     data["attr_values"] = json.dumps(clean)
     data["item_name"] = "-".join(parts)
 
-
 def _product_after(conn, rid, created):
     if created:
         db.run(conn, "UPDATE m_product SET barcode=:b WHERE id=:i", b=_ean13(f"200{rid:09d}"), i=rid)
-
 
 def _ledger_before(conn, data, payload, rid):
     if data.get("ledger_type") != "Customer":
         for k in ("broker_id", "salesman_id", "brokerage_rate", "cash_discount", "transporter_id"):
             data[k] = None
         payload["discounts"] = []
-
 
 def _txn_type_after(conn, rid, created):
     db.run(conn, "UPDATE m_txn_type SET max_number=GREATEST(max_number, start_number-1) WHERE id=:i", i=rid)
@@ -259,7 +246,6 @@ def _check_cycle(conn, table, rid, parent):
             raise ApiError("A record cannot sit under itself", field="parent_id")
         seen.add(parent)
         parent = db.scalar(conn, f"SELECT parent_id FROM `{table}` WHERE id=:i", i=parent)
-
 
 def save(conn, key, payload, rid=None):
     m = _m(key)
@@ -301,7 +287,6 @@ def save(conn, key, payload, rid=None):
         after(conn, rid, created)
     return rid
 
-
 def _friendly(e):
     msg = str(e.orig)
     if "Duplicate" in msg:
@@ -311,7 +296,6 @@ def _friendly(e):
     return ApiError("Could not save: " + msg[:160], 400)
 
 
-@bp.post("/masters/<key>")
 @require(lambda kw: kw["key"], "create")
 def create(key):
     try:
@@ -322,7 +306,6 @@ def create(key):
         raise _friendly(e)
 
 
-@bp.put("/masters/<key>/<int:rid>")
 @require(lambda kw: kw["key"], "edit")
 def update_(key, rid):
     try:
@@ -333,7 +316,6 @@ def update_(key, rid):
         raise _friendly(e)
 
 
-@bp.delete("/masters/<key>/<int:rid>")
 @require(lambda kw: kw["key"], "delete")
 def delete_(key, rid):
     m = _m(key)

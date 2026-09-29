@@ -3,14 +3,13 @@ import datetime as dt
 import json
 from decimal import ROUND_HALF_UP, Decimal
 
-from flask import Blueprint, g, jsonify, request
+from flask import g, jsonify, request
 
-from . import db
-from .auth import can, login_required, require
-from .errors import ApiError
-from .vouchers_cfg import ITEM_COLS, RATE_IN, RATE_ON, VOUCHERS
+from app import db
+from controllers.auth_controller import can, login_required, require
+from app.errors import ApiError
+from app.vouchers_cfg import ITEM_COLS, RATE_IN, RATE_ON, VOUCHERS
 
-bp = Blueprint("vouchers", __name__, url_prefix="/api")
 
 HEADER_TEXT = ["retailer_name", "remarks", "ref_doc_no"]
 HEADER_INT = ["salesman_id", "broker_id", "ref_voucher_id", "packing_list_id"]
@@ -18,17 +17,14 @@ HEADER_DATE = ["ref_doc_date"]
 LOGISTICS_DATES = ["einvoice_date", "eway_bill_date", "courier_slip_date", "transporter_cn_date"]
 LOGISTICS_TEXT = ["einvoice_no", "eway_bill_no", "courier_slip_no", "transporter_cn_no"]
 
-
 def D(x):
     try:
         return Decimal(str(x if x not in (None, "") else 0))
     except Exception:
         raise ApiError("A number field has an invalid value")
 
-
 def q2(x):
     return x.quantize(Decimal("0.01"), ROUND_HALF_UP)
-
 
 def cfg(doc):
     if doc not in VOUCHERS:
@@ -40,8 +36,12 @@ def cfg(doc):
 def _fmt_no(tt, n):
     return f"{tt['prefix'] or ''}{str(n).zfill(4)}{tt['suffix'] or ''}"
 
-
 def next_number(conn, txn_type_id, kind, commit=True):
+    if not txn_type_id:
+        tt = db.one(conn, "SELECT * FROM m_txn_type WHERE txn_kind=:k AND active=1 LIMIT 1", k=kind)
+        if not tt:
+            raise ApiError(f"Please create a Transaction Type for '{kind}' first in Masters -> System")
+        txn_type_id = tt["id"]
     tt = db.one(conn, "SELECT * FROM m_txn_type WHERE id=:i" + (" FOR UPDATE" if commit else ""), i=txn_type_id)
     if not tt or not tt["active"]:
         raise ApiError("Pick a valid transaction type", field="txn_type_id")
@@ -122,7 +122,6 @@ LEFT JOIN txn_header sh ON sh.id=i.src_header_id
 WHERE i.header_id=:h ORDER BY i.line_no
 """
 
-
 def used_downstream(conn, hid, strict=False):
     flt = "" if strict else " AND {a}.approval_status<>'Rejected'"
     n = db.scalar(conn, "SELECT COUNT(*) FROM txn_item x JOIN txn_header xh ON xh.id=x.header_id WHERE x.src_header_id=:h"
@@ -132,7 +131,6 @@ def used_downstream(conn, hid, strict=False):
     n += db.scalar(conn, "SELECT COUNT(*) FROM prod_plan_order po JOIN prod_plan pp ON pp.id=po.plan_id "
                          "WHERE po.order_id=:h AND pp.status='Accepted'", h=hid)
     return n > 0
-
 
 def get_voucher(conn, hid, doc=None):
     h = db.one(conn, HDR_SQL + " WHERE h.id=:i", i=hid)
@@ -178,7 +176,6 @@ SELECT * FROM (
 ) t WHERE pending_qty>0 ORDER BY src_date, src_header_id
 """
 
-
 def pending_lines(conn, doc, party_id=None, exclude=0):
     src = cfg(doc).get("source")
     if not src:
@@ -190,7 +187,6 @@ def pending_lines(conn, doc, party_id=None, exclude=0):
     if party_id:
         p["party"] = party_id
     return db.all_(conn, PENDING_SQL.format(party=party), **p)
-
 
 def _pending_one(conn, col, item_id, exclude):
     if col == "req_item_id":
@@ -209,7 +205,6 @@ def lot_balance(conn, barcode, godown_id, bin_no, exclude_header=0):
     return D(db.scalar(conn, "SELECT COALESCE(SUM(qty),0) FROM stock_ledger WHERE barcode=:b AND godown_id=:g "
                              "AND bin_no=:n AND header_id<>:h", b=barcode, g=godown_id, n=bin_no or "", h=exclude_header))
 
-
 def post_stock(conn, h, c):
     sign = c.get("stock", 0)
     if not sign:
@@ -227,7 +222,6 @@ def post_stock(conn, h, c):
         for (bc, gd, bn), q in need.items():
             if lot_balance(conn, bc, gd, bn) < 0:
                 raise ApiError(f"Not enough stock in barcode {bc} (godown/bin selected). Reduce the quantity.")
-
 
 def unpost_stock(conn, h):
     rows = db.all_(conn, "SELECT barcode,godown_id,bin_no,SUM(qty) q FROM stock_ledger WHERE header_id=:h GROUP BY barcode,godown_id,bin_no", h=h["id"])
@@ -261,7 +255,6 @@ def _clean_items(conn, doc, c, raw):
         items.append(it)
     return items
 
-
 def _clean_ledgers(raw):
     out = []
     for n, r in enumerate(raw or [], 1):
@@ -272,7 +265,6 @@ def _clean_ledgers(raw):
         out.append({"line_no": n, "ledger_id": int(r["ledger_id"]), "rate": D(r.get("rate")),
                     "rate_in": r.get("rate_in") or "percent", "rate_on": r.get("rate_on") or "auto"})
     return out
-
 
 def _validate_links(conn, doc, c, h, items, hid):
     src, party = c.get("source"), h["party_id"]
@@ -301,7 +293,6 @@ def _validate_links(conn, doc, c, h, items, hid):
                 raise ApiError("That packing list already has an invoice")
             if any(i["src_header_id"] != lid for i in items):
                 raise ApiError("All lines must come from the selected packing list")
-
 
 def _validate_stock_lines(conn, doc, c, h, items, hid):
     sign = c.get("stock", 0)
@@ -342,7 +333,6 @@ def _validate_stock_lines(conn, doc, c, h, items, hid):
         if sign < 0 and not db.scalar(conn, "SELECT COUNT(*) FROM stock_ledger WHERE barcode=:b AND godown_id=:g AND bin_no=:n",
                                       b=i["barcode"], g=i["godown_id"], n=i["bin_no"] or ""):
             raise ApiError(f"Line {i['line_no']}: barcode {i['barcode']} isn't stocked in that godown/bin")
-
 
 def save_voucher(conn, doc, payload, user_id, hid=None, channel="ui"):
     c = cfg(doc)
@@ -471,7 +461,6 @@ def gst_suggest(conn, party_id, branch_id, items):
 
 
 # ================================================================== routes
-@bp.get("/vouchers/<doc>")
 @require(lambda kw: kw["doc"], "view")
 def list_(doc):
     cfg(doc)
@@ -498,14 +487,12 @@ def list_(doc):
     return jsonify({"rows": rows, "total": total, "page": page, "page_size": size})
 
 
-@bp.get("/vouchers/<doc>/<int:hid>")
 @require(lambda kw: kw["doc"], "view")
 def get_(doc, hid):
     with db.tx() as conn:
         return jsonify(get_voucher(conn, hid, doc))
 
 
-@bp.get("/vouchers/<doc>/next-number")
 @require(lambda kw: kw["doc"], "view")
 def preview_number(doc):
     with db.tx() as conn:
@@ -513,7 +500,6 @@ def preview_number(doc):
     return jsonify({"voucher_no": no, "branch_id": tt["branch_id"]})
 
 
-@bp.post("/vouchers/<doc>")
 @require(lambda kw: kw["doc"], "create")
 def create(doc):
     with db.tx() as conn:
@@ -521,7 +507,6 @@ def create(doc):
         return jsonify(get_voucher(conn, hid)), 201
 
 
-@bp.put("/vouchers/<doc>/<int:hid>")
 @require(lambda kw: kw["doc"], "edit")
 def update_(doc, hid):
     with db.tx() as conn:
@@ -529,7 +514,6 @@ def update_(doc, hid):
         return jsonify(get_voucher(conn, hid))
 
 
-@bp.delete("/vouchers/<doc>/<int:hid>")
 @require(lambda kw: kw["doc"], "delete")
 def delete_(doc, hid):
     with db.tx() as conn:
@@ -542,7 +526,6 @@ def delete_(doc, hid):
     return jsonify({"ok": True})
 
 
-@bp.post("/vouchers/<doc>/<int:hid>/<action>")
 @require(lambda kw: kw["doc"], "approve")
 def action_(doc, hid, action):
     if action not in ("approve", "reject", "unapprove"):
@@ -552,14 +535,12 @@ def action_(doc, hid, action):
         return jsonify(get_voucher(conn, hid))
 
 
-@bp.get("/vouchers/<doc>/pending-source")
 @require(lambda kw: kw["doc"], "create")
 def pending_(doc):
     with db.tx() as conn:
         return jsonify(pending_lines(conn, doc, request.args.get("party_id"), int(request.args.get("exclude", 0))))
 
 
-@bp.post("/vouchers/<doc>/gst-suggest")
 @require(lambda kw: kw["doc"], "create")
 def gst_(doc):
     d = request.get_json(force=True) or {}
@@ -567,7 +548,6 @@ def gst_(doc):
         return jsonify(gst_suggest(conn, d.get("party_id"), d.get("branch_id"), d.get("items") or []))
 
 
-@bp.get("/vouchers/<doc>/ref-vouchers")
 @require(lambda kw: kw["doc"], "create")
 def ref_vouchers(doc):
     """Approved invoices of a party, for returns."""
@@ -581,7 +561,6 @@ def ref_vouchers(doc):
 
 
 # ------------------------------------------------------------------ logistics updation (sales invoice)
-@bp.get("/logistics")
 @require("logistics", "view")
 def logistics_list():
     q = f"%{(request.args.get('q') or '').strip()}%"
@@ -592,7 +571,6 @@ def logistics_list():
                                      "ORDER BY h.voucher_date DESC,h.id DESC LIMIT 100", q=q))
 
 
-@bp.get("/logistics/<int:hid>")
 @require("logistics", "view")
 def logistics_get(hid):
     with db.tx() as conn:
@@ -602,7 +580,6 @@ def logistics_get(hid):
     return jsonify(h)
 
 
-@bp.put("/logistics/<int:hid>")
 @require("logistics", "edit")
 def logistics_save(hid):
     d = request.get_json(force=True) or {}

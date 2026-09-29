@@ -1,12 +1,10 @@
 from flask import Blueprint, jsonify
 
-from . import db
-from .auth import login_required
-
-bp = Blueprint("dashboard", __name__, url_prefix="/api")
+from app import db
+from controllers.auth_controller import login_required
 
 
-@bp.get("/dashboard")
+
 @login_required
 def dashboard():
     with db.tx() as c:

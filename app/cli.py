@@ -8,7 +8,7 @@ import click
 from werkzeug.security import generate_password_hash
 
 from . import db
-from .masters import save
+from controllers.masters_controller import save
 from .registry import TXN_KINDS
 
 SCHEMA = os.path.join(os.path.dirname(__file__), "..", "sql", "schema.sql")

@@ -6,21 +6,18 @@ import secrets
 from functools import wraps
 
 import jwt
-from flask import Blueprint, current_app, g, jsonify, request
+from flask import current_app, g, jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from . import db
-from .errors import ApiError
+from app import db
+from app.errors import ApiError
 
-bp = Blueprint("auth", __name__, url_prefix="/api")
 
 ACTIONS = ["view", "create", "edit", "delete", "approve"]
-
 
 def make_token(user):
     exp = dt.datetime.utcnow() + dt.timedelta(hours=current_app.config["TOKEN_HOURS"])
     return jwt.encode({"uid": user["id"], "exp": exp}, current_app.config["SECRET_KEY"], algorithm="HS256")
-
 
 def load_user():
     h = request.headers.get("Authorization", "")
@@ -39,14 +36,12 @@ def load_user():
     u["permissions"] = json.loads(perms) if isinstance(perms, (str, bytes)) else perms
     return u
 
-
 def can(user, resource, action):
     p = user["permissions"]
     if "*" in p:
         return True
     acts = p.get(resource, [])
     return "*" in acts or action in acts
-
 
 def require(resource, action="view"):
     """Decorator. `resource` may be a callable(kwargs)->str for dynamic keys (e.g. masters/<key>)."""
@@ -61,7 +56,6 @@ def require(resource, action="view"):
         return wrapper
     return deco
 
-
 def login_required(fn):
     @wraps(fn)
     def wrapper(*a, **kw):
@@ -71,7 +65,6 @@ def login_required(fn):
 
 
 # ------------------------------------------------------------------ routes
-@bp.post("/auth/login")
 def login():
     d = request.get_json(force=True) or {}
     with db.tx() as c:
@@ -82,7 +75,6 @@ def login():
         db.run(c, "UPDATE app_user SET last_login=NOW() WHERE id=:i", i=u["id"])
     return jsonify({"token": make_token(u), "user": me_payload(u["id"])})
 
-
 def me_payload(uid):
     with db.tx() as c:
         u = db.one(c, "SELECT u.id,u.username,u.full_name,r.name role,r.permissions FROM app_user u "
@@ -92,13 +84,11 @@ def me_payload(uid):
     return u
 
 
-@bp.get("/auth/me")
 @login_required
 def me():
     return jsonify(me_payload(g.user["id"]))
 
 
-@bp.post("/auth/change-password")
 @login_required
 def change_password():
     d = request.get_json(force=True) or {}
@@ -112,8 +102,6 @@ def change_password():
         db.run(c, "UPDATE app_user SET password_hash=:h WHERE id=:i", h=d["new_password"], i=u["id"])
     return jsonify({"ok": True})
 
-
-@bp.post("/auth/register")
 def register():
     d = request.get_json(force=True) or {}
     username = (d.get("username") or "").strip()
@@ -144,7 +132,6 @@ def register():
     return jsonify({"token": make_token(u), "user": me_payload(u["id"])})
 
 # ---- roles
-@bp.get("/roles")
 @require("users", "view")
 def roles_list():
     with db.tx() as c:
@@ -155,8 +142,6 @@ def roles_list():
     return jsonify(rows)
 
 
-@bp.post("/roles")
-@bp.put("/roles/<int:rid>")
 @require("users", "edit")
 def role_save(rid=None):
     d = request.get_json(force=True) or {}
@@ -172,7 +157,6 @@ def role_save(rid=None):
     return jsonify({"id": rid})
 
 
-@bp.delete("/roles/<int:rid>")
 @require("users", "delete")
 def role_delete(rid):
     with db.tx() as c:
@@ -183,7 +167,6 @@ def role_delete(rid):
 
 
 # ---- users
-@bp.get("/users")
 @require("users", "view")
 def users_list():
     with db.tx() as c:
@@ -191,8 +174,6 @@ def users_list():
                                   "FROM app_user u JOIN app_role r ON r.id=u.role_id ORDER BY u.username"))
 
 
-@bp.post("/users")
-@bp.put("/users/<int:uid>")
 @require("users", "edit")
 def user_save(uid=None):
     d = request.get_json(force=True) or {}
@@ -216,14 +197,12 @@ def user_save(uid=None):
 
 
 # ---- API keys (for sales-order / packing-list integrations)
-@bp.get("/api-clients")
 @require("users", "view")
 def api_clients():
     with db.tx() as c:
         return jsonify(db.all_(c, "SELECT id,name,key_prefix,active,created_at FROM api_client ORDER BY id DESC"))
 
 
-@bp.post("/api-clients")
 @require("users", "edit")
 def api_client_create():
     name = ((request.get_json(force=True) or {}).get("name") or "").strip()
@@ -236,7 +215,6 @@ def api_client_create():
     return jsonify({"id": cid, "key": key, "note": "Copy this key now. It cannot be shown again."})
 
 
-@bp.put("/api-clients/<int:cid>/toggle")
 @require("users", "edit")
 def api_client_toggle(cid):
     with db.tx() as c:
