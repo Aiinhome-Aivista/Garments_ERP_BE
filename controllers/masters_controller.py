@@ -139,7 +139,7 @@ def load_one(conn, key, rid):
     return row
 
 
-@require(lambda kw: kw["key"], "view")
+@login_required
 def get_(key, rid):
     with db.tx() as c:
         return jsonify(load_one(c, key, rid))
