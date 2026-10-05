@@ -466,20 +466,23 @@ def list_(doc):
     cfg(doc)
     a = request.args
     where, p = ["h.doc_type=:d"], {"d": doc}
-    if a.get("status"):
-        where.append("h.approval_status=:s"); p["s"] = a["status"]
-    if a.get("from"):
-        where.append("h.voucher_date>=:f"); p["f"] = a["from"]
-    if a.get("to"):
-        where.append("h.voucher_date<=:t"); p["t"] = a["to"]
-    if a.get("party_id"):
-        where.append("h.party_id=:pp"); p["pp"] = a["party_id"]
+    for k, col in [("s_voucher_no", "h.voucher_no"), ("s_voucher_date", "h.voucher_date"), 
+                   ("s_party_name", "pa.name"), ("s_txn_type", "tt.name"), ("s_status", "h.approval_status")]:
+        if a.get(k):
+            vals = [x.strip() for x in a[k].split(",") if x.strip()]
+            if not vals: continue
+            or_conds = []
+            for i, val in enumerate(vals):
+                pk = f"{k}_{i}"
+                or_conds.append(f"{col} LIKE :{pk}")
+                p[pk] = f"%{val}%"
+            where.append("(" + " OR ".join(or_conds) + ")")
     if a.get("q"):
         where.append("(h.voucher_no LIKE :q OR pa.name LIKE :q)"); p["q"] = f"%{a['q'].strip()}%"
     page, size = max(int(a.get("page", 1)), 1), min(int(a.get("page_size", 30)), 200)
     w = " AND ".join(where)
     with db.tx() as conn:
-        total = db.scalar(conn, f"SELECT COUNT(*) FROM txn_header h JOIN m_ledger pa ON pa.id=h.party_id WHERE {w}", **p)
+        total = db.scalar(conn, f"SELECT COUNT(*) FROM txn_header h JOIN m_ledger pa ON pa.id=h.party_id JOIN m_txn_type tt ON tt.id=h.txn_type_id WHERE {w}", **p)
         rows = db.all_(conn, f"SELECT h.id,h.voucher_no,h.voucher_date,h.total_qty,h.total_value,h.approval_status,h.source_channel,"
                              f"pa.name party_name,tt.name txn_type FROM txn_header h JOIN m_ledger pa ON pa.id=h.party_id "
                              f"JOIN m_txn_type tt ON tt.id=h.txn_type_id WHERE {w} ORDER BY h.voucher_date DESC,h.id DESC "

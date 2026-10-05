@@ -91,6 +91,10 @@ def auth_user_save(uid=None):
 def auth_user_save_1(uid=None):
     return auth_controller.user_save(uid=uid)
 
+@app.route('/api/users/<int:uid>', methods=['DELETE'])
+def auth_user_delete(uid):
+    return auth_controller.user_delete(uid=uid)
+
 @app.route('/api/api-clients', methods=['GET'])
 def auth_api_clients():
     return auth_controller.api_clients()

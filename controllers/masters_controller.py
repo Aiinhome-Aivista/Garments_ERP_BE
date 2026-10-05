@@ -69,16 +69,62 @@ def _filters(m, key):
             else:
                 where.append(f"t.`{k[2:]}`=:{k}")
                 p[k] = v
+        elif k.startswith("s_") and v:
+            col = k[2:]
+            from app.registry import label_col as get_label_col
+            if col in ok or col == get_label_col(key):
+                field = next((f for f in m.get("fields", []) if f["name"] == col), None)
+                vals = [x.strip() for x in v.split(",") if x.strip()]
+                if not vals: continue
+                or_conds = []
+                for i, val in enumerate(vals):
+                    pk = f"{k}_{i}"
+                    if col == get_label_col(key) or (field and field["type"] in ("text", "textarea")):
+                        or_conds.append(f"t.`{col}` LIKE :{pk}")
+                        p[pk] = f"%{val}%"
+                    elif field and field["type"] == "ref":
+                        from app.registry import MASTERS
+                        ref = MASTERS[field["ref"]]
+                        or_conds.append(f"t.`{col}` IN (SELECT id FROM `{ref['table']}` WHERE `{get_label_col(field['ref'])}` LIKE :{pk})")
+                        p[pk] = f"%{val}%"
+                    else:
+                        or_conds.append(f"t.`{col}` LIKE :{pk}")
+                        p[pk] = f"%{val}%"
+                where.append("(" + " OR ".join(or_conds) + ")")
     return where, p
 
 def _query(key, limit=None, offset=0, lookup=False):
     m = _m(key)
     where, p = _filters(m, key)
     q = (request.args.get("q") or "").strip()
+    search_col = (request.args.get("search_col") or "").strip()
     if q:
-        cols = [label_col(key)] + [f["name"] for f in m["fields"] if f.get("list") and f["type"] == "text" and f["name"] != label_col(key)]
-        where.append("(" + " OR ".join(f"t.`{c}` LIKE :q" for c in cols) + ")")
-        p["q"] = f"%{q}%"
+        if search_col:
+            field = next((f for f in m["fields"] if f["name"] == search_col), None)
+            if search_col == label_col(key):
+                where.append(f"t.`{search_col}` LIKE :q")
+                p["q"] = f"%{q}%"
+            elif field:
+                if field["type"] == "ref":
+                    from app.registry import MASTERS, label_col as get_label_col
+                    ref = MASTERS[field["ref"]]
+                    where.append(f"t.`{search_col}` IN (SELECT id FROM `{ref['table']}` WHERE `{get_label_col(field['ref'])}` LIKE :q)")
+                else:
+                    where.append(f"t.`{search_col}` LIKE :q")
+                p["q"] = f"%{q}%"
+        else:
+            or_parts = []
+            cols_text = [label_col(key)] + [f["name"] for f in m["fields"] if f.get("list") and f["type"] == "text" and f["name"] != label_col(key)]
+            for c in cols_text:
+                or_parts.append(f"t.`{c}` LIKE :q")
+            for f in m["fields"]:
+                if f.get("list") and f["type"] == "ref":
+                    from app.registry import MASTERS, label_col as get_label_col
+                    ref = MASTERS[f["ref"]]
+                    or_parts.append(f"t.`{f['name']}` IN (SELECT id FROM `{ref['table']}` WHERE `{get_label_col(f['ref'])}` LIKE :q)")
+            if or_parts:
+                where.append("(" + " OR ".join(or_parts) + ")")
+                p["q"] = f"%{q}%"
     act = request.args.get("active", "1")
     if lookup or act in ("0", "1"):
         where.append("t.active=:act")

@@ -60,17 +60,30 @@ def report():
     mode = a.get("mode", "product")
     q = f"%{(a.get('q') or '').strip()}%"
     with db.tx() as conn:
+        p = {"q": q}
         if mode == "lot":
-            rows = db.all_(conn, "SELECT s.barcode,p.item_name,g.name godown,s.bin_no,SUM(s.qty) balance,u.name uom,MIN(s.txn_date) since "
-                                 "FROM stock_ledger s JOIN m_product p ON p.id=s.product_id JOIN m_godown g ON g.id=s.godown_id "
-                                 "JOIN m_uom u ON u.id=p.uom_id WHERE (p.item_name LIKE :q OR s.barcode LIKE :q) "
-                                 "GROUP BY s.barcode,p.item_name,g.name,s.bin_no,u.name HAVING SUM(s.qty)<>0 ORDER BY p.item_name,since LIMIT 1000", q=q)
+            where = ["(p.item_name LIKE :q OR s.barcode LIKE :q OR g.name LIKE :q OR s.bin_no LIKE :q)"]
+            if a.get("s_barcode"): where.append("s.barcode LIKE :s_barcode"); p["s_barcode"] = f"%{a['s_barcode']}%"
+            if a.get("s_item_name"): where.append("p.item_name LIKE :s_item_name"); p["s_item_name"] = f"%{a['s_item_name']}%"
+            if a.get("s_godown"): where.append("g.name LIKE :s_godown"); p["s_godown"] = f"%{a['s_godown']}%"
+            if a.get("s_bin_no"): where.append("s.bin_no LIKE :s_bin_no"); p["s_bin_no"] = f"%{a['s_bin_no']}%"
+            where_str = " AND ".join(where)
+            
+            rows = db.all_(conn, f"SELECT s.barcode,p.item_name,g.name godown,s.bin_no,SUM(s.qty) balance,u.name uom,MIN(s.txn_date) since "
+                                 f"FROM stock_ledger s JOIN m_product p ON p.id=s.product_id JOIN m_godown g ON g.id=s.godown_id "
+                                 f"JOIN m_uom u ON u.id=p.uom_id WHERE {where_str} "
+                                 f"GROUP BY s.barcode,p.item_name,g.name,s.bin_no,u.name HAVING SUM(s.qty)<>0 ORDER BY p.item_name,since LIMIT 1000", **p)
         else:
-            rows = db.all_(conn, "SELECT p.id product_id,p.item_name,c.name category,u.name uom,p.min_stock,"
-                                 "COALESCE((SELECT SUM(qty) FROM stock_ledger WHERE product_id=p.id),0) on_hand,"
-                                 "COALESCE((SELECT SUM(qty) FROM stock_reservation WHERE product_id=p.id AND active=1),0) reserved "
-                                 "FROM m_product p JOIN m_uom u ON u.id=p.uom_id JOIN m_product_category c ON c.id=p.category_id "
-                                 "WHERE p.active=1 AND p.item_name LIKE :q ORDER BY p.item_name LIMIT 1000", q=q)
+            where = ["(p.item_name LIKE :q OR c.name LIKE :q)"]
+            if a.get("s_item_name"): where.append("p.item_name LIKE :s_item_name"); p["s_item_name"] = f"%{a['s_item_name']}%"
+            if a.get("s_category"): where.append("c.name LIKE :s_category"); p["s_category"] = f"%{a['s_category']}%"
+            where_str = " AND ".join(where)
+            
+            rows = db.all_(conn, f"SELECT p.id product_id,p.item_name,c.name category,u.name uom,p.min_stock,"
+                                 f"COALESCE((SELECT SUM(qty) FROM stock_ledger WHERE product_id=p.id),0) on_hand,"
+                                 f"COALESCE((SELECT SUM(qty) FROM stock_reservation WHERE product_id=p.id AND active=1),0) reserved "
+                                 f"FROM m_product p JOIN m_uom u ON u.id=p.uom_id JOIN m_product_category c ON c.id=p.category_id "
+                                 f"WHERE p.active=1 AND {where_str} ORDER BY p.item_name LIMIT 1000", **p)
             for r in rows:
                 r["free"] = float(r["on_hand"]) - float(r["reserved"])
     return jsonify(rows)

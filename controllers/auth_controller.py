@@ -196,6 +196,15 @@ def user_save(uid=None):
     return jsonify({"id": uid})
 
 
+@require("users", "delete")
+def user_delete(uid):
+    with db.tx() as c:
+        if db.scalar(c, "SELECT COUNT(*) FROM app_user WHERE id=:i AND username='admin'", i=uid):
+            raise ApiError("Cannot delete the default admin user")
+        db.run(c, "DELETE FROM app_user WHERE id=:i", i=uid)
+    return jsonify({"ok": True})
+
+
 # ---- API keys (for sales-order / packing-list integrations)
 @require("users", "view")
 def api_clients():

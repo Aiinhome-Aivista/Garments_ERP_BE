@@ -151,7 +151,7 @@ MASTERS = {
 
     # ---------------------------------------------------------------- system
     "txn_type": dict(
-        table="m_txn_type", label="Transaction types", group="System", icon="ticket", hierarchical=True, hook="txn_type",
+        table="m_txn_type", label="Transaction types", group="System", icon="ticket", hook="txn_type",
         help="Number series per branch. 'Max number' is maintained automatically.",
         fields=[T("name", "Name", required=True, list=True),
                 dict(name="txn_kind", label="Type of transaction", type="select", options=TXN_KINDS, required=True, list=True),
@@ -162,7 +162,8 @@ MASTERS = {
                 dict(name="max_number", label="Max number (auto)", type="readonly", list=True)],
         children=[dict(key="terms", table="m_txn_type_terms", fk="txn_type_id", label="Terms & conditions",
                        order="sl_no", seq_col="sl_no",
-                       fields=[dict(name="description", label="Description", type="textarea", required=True)])]),
+                       fields=[dict(name="caption", label="Caption", type="text", required=True),
+                               dict(name="description", label="Description", type="textarea", required=True)])]),
 }
 
 DEFAULT_LABEL_COL = "name"
@@ -181,6 +182,18 @@ def field_names(key):
 
 def public_registry():
     """Registry as sent to the browser (no hooks, no table names)."""
+    
+    db_kinds = TXN_KINDS
+    try:
+        from app.db import engine
+        from sqlalchemy import text
+        with engine().begin() as c:
+            rows = c.execute(text("SELECT DISTINCT txn_kind FROM m_txn_type WHERE txn_kind IS NOT NULL ORDER BY txn_kind")).fetchall()
+            if rows:
+                db_kinds = [r[0] for r in rows]
+    except Exception:
+        pass
+
     out = {}
     for k, m in MASTERS.items():
         out[k] = {kk: vv for kk, vv in m.items() if kk not in ("table", "hook")}
@@ -188,4 +201,14 @@ def public_registry():
         out[k]["label_col"] = label_col(k)
         if "children" in m:
             out[k]["children"] = [{kk: vv for kk, vv in c.items() if kk not in ("table", "fk")} for c in m["children"]]
+        
+        if k == "txn_type":
+            new_fields = []
+            for f in out[k].get("fields", []):
+                nf = dict(f)
+                if nf.get("name") == "txn_kind":
+                    nf["options"] = db_kinds
+                new_fields.append(nf)
+            out[k]["fields"] = new_fields
+
     return out
