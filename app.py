@@ -167,6 +167,10 @@ def planning_plan_get(pid):
 def planning_plan_cancel(pid):
     return planning_controller.plan_cancel(pid=pid)
 
+@app.route('/api/planning/<int:pid>/complete', methods=['POST'])
+def planning_plan_complete(pid):
+    return planning_controller.plan_complete(pid=pid)
+
 @app.route('/api/requisitions', methods=['GET'])
 def planning_req_list():
     return planning_controller.req_list()

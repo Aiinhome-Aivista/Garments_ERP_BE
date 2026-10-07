@@ -188,6 +188,60 @@ def plan_cancel(pid):
     return jsonify({"ok": True})
 
 
+@require("planning", "edit")
+def plan_complete(pid):
+    with db.tx() as conn:
+        p = db.one(conn, "SELECT * FROM prod_plan WHERE id=:i FOR UPDATE", i=pid)
+        if not p or p["status"] != "Accepted":
+            raise ApiError("Only accepted plans can be completed")
+        
+        # 1. Clear stock reservations
+        db.run(conn, "UPDATE stock_reservation SET active=0 WHERE plan_id=:i", i=pid)
+        
+        # 2. Create a dummy txn_header for the production
+        hid = db.insert(conn, "txn_header", {
+            "doc_type": "production",
+            "voucher_no": "PR/" + p["plan_no"],
+            "voucher_date": db.scalar(conn, "SELECT CURRENT_DATE()"),
+            "approval_status": "Approved",
+            "remarks": "Auto-completed from plan"
+        })
+        
+        # 3. Consume raw materials
+        materials = db.all_(conn, "SELECT * FROM prod_plan_material WHERE plan_id=:i", i=pid)
+        for m in materials:
+            # find where it's stored and consume it
+            lots = db.all_(conn, "SELECT barcode, godown_id, bin_no, SUM(qty) bal FROM stock_ledger WHERE product_id=:p GROUP BY barcode, godown_id, bin_no HAVING SUM(qty)>0 ORDER BY MIN(txn_date)", p=m["product_id"])
+            needed = m["required_qty"]
+            for lot in lots:
+                if needed <= 0: break
+                take = min(needed, lot["bal"])
+                needed -= take
+                it = {"header_id": hid, "product_id": m["product_id"], "qty": take, "barcode": lot["barcode"], "godown_id": lot["godown_id"], "bin_no": lot["bin_no"], "line_no": 1}
+                iid = db.insert(conn, "txn_item", it)
+                db.insert(conn, "stock_ledger", {"header_id": hid, "item_id": iid, "txn_date": p["plan_date"], "product_id": m["product_id"], "barcode": lot["barcode"], "godown_id": lot["godown_id"], "bin_no": lot["bin_no"], "qty": -take})
+            
+            if needed > 0:
+                raise ApiError(f"Not enough stock to consume for RM. Need {needed} more.")
+                
+        # 4. Receive finished goods
+        fgs = db.all_(conn, "SELECT * FROM prod_plan_fg WHERE plan_id=:i", i=pid)
+        for f in fgs:
+            # We need a godown_id. Let's just pick the first godown in the system.
+            godown = db.one(conn, "SELECT id FROM m_godown LIMIT 1")
+            gid = godown["id"] if godown else 1
+            it = {"header_id": hid, "product_id": f["product_id"], "qty": f["required_qty"], "godown_id": gid, "line_no": 2}
+            iid = db.insert(conn, "txn_item", it)
+            bc = f"B{f['product_id']:05d}{hid:07d}02"
+            db.run(conn, "UPDATE txn_item SET barcode=:b WHERE id=:i", b=bc, i=iid)
+            db.insert(conn, "stock_ledger", {"header_id": hid, "item_id": iid, "txn_date": p["plan_date"], "product_id": f["product_id"], "barcode": bc, "godown_id": gid, "bin_no": "F1", "qty": f["required_qty"]})
+            
+        # 5. Update plan status
+        db.run(conn, "UPDATE prod_plan SET status='Completed' WHERE id=:i", i=pid)
+        
+    return jsonify({"ok": True})
+
+
 # ------------------------------------------------------------------ requisition for PO
 REQ_LIST = """SELECT r.id,r.req_no,r.req_date,r.source,r.status,r.remarks,p.plan_no,
  (SELECT COUNT(*) FROM requisition_item WHERE requisition_id=r.id) line_count,
