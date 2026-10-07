@@ -68,7 +68,7 @@ def login_required(fn):
 def login():
     d = request.get_json(force=True) or {}
     with db.tx() as c:
-        u = db.one(c, "SELECT * FROM app_user WHERE username=:u OR email=:u", u=(d.get("username") or "").strip())
+        u = db.one(c, "SELECT * FROM app_user WHERE username=:u", u=(d.get("username") or "").strip())
         pwd_match = u and ((u["password_hash"] == (d.get("password") or "")) or check_password_hash(u["password_hash"], d.get("password") or ""))
         if not u or not u["active"] or not pwd_match:
             raise ApiError("Wrong username or password", 401)
