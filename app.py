@@ -275,7 +275,10 @@ from app.vouchers_cfg import RATE_IN, RATE_ON, public_vouchers
 @app.get("/api/meta")
 @auth_controller.login_required
 def meta():
+    with db.tx() as c:
+        txn_types = db.all_(c, "SELECT id, name, txn_kind FROM m_txn_type WHERE active=1 ORDER BY name")
     return jsonify({"masters": public_registry(), "master_groups": MASTER_GROUPS, "vouchers": public_vouchers(),
+                    "txn_types": txn_types,
                     "item_cols": __import__("app.vouchers_cfg", fromlist=["ITEM_COLS"]).ITEM_COLS,
                     "rate_in": RATE_IN, "rate_on": [{"value": v, "label": l} for v, l in RATE_ON],
                     "ledger_types": LEDGER_TYPES, "actions": auth_controller.ACTIONS})

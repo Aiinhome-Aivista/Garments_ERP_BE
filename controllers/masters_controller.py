@@ -98,8 +98,11 @@ def _query(key, limit=None, offset=0, lookup=False):
     where, p = _filters(m, key)
     q = (request.args.get("q") or "").strip()
     search_col = (request.args.get("search_col") or "").strip()
+    q_hier = False
     if q:
-        if search_col:
+        if m.get("hierarchical") and not search_col:
+            q_hier = True
+        elif search_col:
             field = next((f for f in m["fields"] if f["name"] == search_col), None)
             if search_col == label_col(key):
                 where.append(f"t.`{search_col}` LIKE :q")
@@ -134,13 +137,19 @@ def _query(key, limit=None, offset=0, lookup=False):
     with db.tx() as c:
         total = db.scalar(c, f"SELECT COUNT(*) FROM `{m['table']}` t{wsql}", **p)
         order = f"t.`{label_col(key)}`" if not m.get("hierarchical") else "t.id"
-        lim = f" LIMIT {int(limit)} OFFSET {int(offset)}" if limit else ""
+        lim = f" LIMIT {int(limit)} OFFSET {int(offset)}" if limit and not m.get("hierarchical") else ""
         rows = db.all_(c, f"{base}{wsql} ORDER BY {order}{lim}", **p)
         if m.get("hierarchical"):
             paths = _paths(c, m["table"])
             for r in rows:
                 r["path"], r["depth"] = paths.get(r["id"], (r["name"], 0))
+            if q_hier:
+                q_lower = q.lower()
+                rows = [r for r in rows if q_lower in r["path"].lower()]
+                total = len(rows)
             rows.sort(key=lambda r: r["path"].lower())
+            if limit:
+                rows = rows[int(offset):int(offset)+int(limit)]
     return [_post(m, r) for r in rows], total
 
 

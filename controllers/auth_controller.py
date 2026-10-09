@@ -41,7 +41,20 @@ def can(user, resource, action):
     if "*" in p:
         return True
     acts = p.get(resource, [])
-    return "*" in acts or action in acts
+    if "*" in acts or action in acts:
+        return True
+    
+    # If the resource is a voucher doc_type, check if any txn_type of this doc_type is allowed
+    from app.vouchers_cfg import VOUCHERS
+    if resource in VOUCHERS:
+        kind = VOUCHERS[resource]["kind"]
+        with db.tx() as c:
+            types = db.all_(c, "SELECT id FROM m_txn_type WHERE txn_kind=:k", k=kind)
+        for t in types:
+            t_acts = p.get(f"txn_type_{t['id']}", [])
+            if "*" in t_acts or action in t_acts:
+                return True
+    return False
 
 def require(resource, action="view"):
     """Decorator. `resource` may be a callable(kwargs)->str for dynamic keys (e.g. masters/<key>)."""

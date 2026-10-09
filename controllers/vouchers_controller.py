@@ -145,6 +145,16 @@ def get_voucher(conn, hid, doc=None):
     h["locked"] = h["approval_status"] == "Approved" or used_downstream(conn, hid)
     return h
 
+def check_voucher_permission(conn, hid, action):
+    if "*" in g.user["permissions"]:
+        return
+    tid = db.scalar(conn, "SELECT txn_type_id FROM txn_header WHERE id=:i", i=hid)
+    if not tid:
+        raise ApiError("Voucher not found", 404)
+    acts = g.user["permissions"].get(f"txn_type_{tid}", [])
+    if "*" not in acts and action not in acts:
+        raise ApiError(f"You don't have permission to {action} this transaction", 403)
+
 
 # ------------------------------------------------------------------ pending source lines
 PENDING_SQL = """
@@ -479,6 +489,24 @@ def list_(doc):
             where.append("(" + " OR ".join(or_conds) + ")")
     if a.get("q"):
         where.append("(h.voucher_no LIKE :q OR pa.name LIKE :q)"); p["q"] = f"%{a['q'].strip()}%"
+    
+    # Enforce transaction-type level permissions
+    if "*" not in g.user["permissions"]:
+        kind = cfg(doc)["kind"]
+        with db.tx() as c:
+            types = db.all_(c, "SELECT id FROM m_txn_type WHERE txn_kind=:k", k=kind)
+        allowed = []
+        for t in types:
+            acts = g.user["permissions"].get(f"txn_type_{t['id']}", [])
+            if "*" in acts or "view" in acts:
+                allowed.append(t["id"])
+        
+        # If they don't have access to any txn_type for this doc, return empty
+        if not allowed:
+            return jsonify({"rows": [], "total": 0, "page": 1, "page_size": 30})
+            
+        where.append(f"h.txn_type_id IN ({','.join(map(str, allowed))})")
+
     page, size = max(int(a.get("page", 1)), 1), min(int(a.get("page_size", 30)), 200)
     w = " AND ".join(where)
     with db.tx() as conn:
@@ -493,26 +521,40 @@ def list_(doc):
 @require(lambda kw: kw["doc"], "view")
 def get_(doc, hid):
     with db.tx() as conn:
+        check_voucher_permission(conn, hid, "view")
         return jsonify(get_voucher(conn, hid, doc))
 
 
 @require(lambda kw: kw["doc"], "view")
 def preview_number(doc):
+    tid = request.args.get("txn_type_id")
+    if tid and "*" not in g.user["permissions"]:
+        acts = g.user["permissions"].get(f"txn_type_{tid}", [])
+        if "*" not in acts and "view" not in acts and "create" not in acts:
+            raise ApiError("You don't have permission for this transaction type", 403)
     with db.tx() as conn:
-        no, tt = next_number(conn, request.args.get("txn_type_id"), cfg(doc)["kind"], commit=False)
+        no, tt = next_number(conn, tid, cfg(doc)["kind"], commit=False)
     return jsonify({"voucher_no": no, "branch_id": tt["branch_id"]})
 
 
 @require(lambda kw: kw["doc"], "create")
 def create(doc):
+    payload = request.get_json(force=True) or {}
+    tid = payload.get("txn_type_id")
+    if tid and "*" not in g.user["permissions"]:
+        acts = g.user["permissions"].get(f"txn_type_{tid}", [])
+        if "*" not in acts and "create" not in acts:
+            raise ApiError("You don't have permission to create this type of transaction", 403)
+            
     with db.tx() as conn:
-        hid = save_voucher(conn, doc, request.get_json(force=True) or {}, g.user["id"])
+        hid = save_voucher(conn, doc, payload, g.user["id"])
         return jsonify(get_voucher(conn, hid)), 201
 
 
 @require(lambda kw: kw["doc"], "edit")
 def update_(doc, hid):
     with db.tx() as conn:
+        check_voucher_permission(conn, hid, "edit")
         save_voucher(conn, doc, request.get_json(force=True) or {}, g.user["id"], hid)
         return jsonify(get_voucher(conn, hid))
 
@@ -520,6 +562,7 @@ def update_(doc, hid):
 @require(lambda kw: kw["doc"], "delete")
 def delete_(doc, hid):
     with db.tx() as conn:
+        check_voucher_permission(conn, hid, "delete")
         h = db.one(conn, "SELECT approval_status FROM txn_header WHERE id=:i AND doc_type=:d", i=hid, d=doc)
         if not h:
             raise ApiError("Voucher not found", 404)
@@ -534,6 +577,7 @@ def action_(doc, hid, action):
     if action not in ("approve", "reject", "unapprove"):
         raise ApiError("Unknown action", 404)
     with db.tx() as conn:
+        check_voucher_permission(conn, hid, "approve")
         set_status(conn, doc, hid, action, g.user)
         return jsonify(get_voucher(conn, hid))
 
