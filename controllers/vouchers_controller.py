@@ -167,7 +167,8 @@ SELECT * FROM (
         pl.name AS pricelist_label, i.rate, i.disc_pct, i.disc_amt, i.delivery_date, i.ref_no, i.indent_no,
         i.salesman_id, i.broker_id, i.retailer_name, i.req_item_id,
         i.qty - COALESCE((SELECT SUM(x.qty) FROM txn_item x JOIN txn_header xh ON xh.id=x.header_id
-                          WHERE x.src_item_id=i.id AND xh.approval_status<>'Rejected' AND xh.id<>:excl),0) AS pending_qty
+                          WHERE x.src_item_id=i.id AND xh.approval_status<>'Rejected' AND xh.id<>:excl),0) AS pending_qty,
+        COALESCE((SELECT SUM(s.qty) FROM stock_ledger s WHERE s.product_id=i.product_id),0) AS stock_qty
  FROM txn_item i JOIN txn_header h ON h.id=i.header_id JOIN m_product p ON p.id=i.product_id
  JOIN m_uom u ON u.id=p.uom_id LEFT JOIN m_godown gd ON gd.id=i.godown_id LEFT JOIN m_pricelist pl ON pl.id=i.pricelist_id
  LEFT JOIN m_ledger sm ON sm.id=h.salesman_id LEFT JOIN m_ledger bk ON bk.id=h.broker_id
@@ -343,6 +344,19 @@ def _validate_stock_lines(conn, doc, c, h, items, hid):
         if sign < 0 and not db.scalar(conn, "SELECT COUNT(*) FROM stock_ledger WHERE barcode=:b AND godown_id=:g AND bin_no=:n",
                                       b=i["barcode"], g=i["godown_id"], n=i["bin_no"] or ""):
             raise ApiError(f"Line {i['line_no']}: barcode {i['barcode']} isn't stocked in that godown/bin")
+    if sign < 0:
+        totals = {}
+        for i in items:
+            key = (i["barcode"], i["godown_id"], i["bin_no"] or "", i["product_id"])
+            totals[key] = totals.get(key, Decimal(0)) + i["qty"]
+        for (bc, gd, bn, pid), tot_q in totals.items():
+            bal = lot_balance(conn, bc, gd, bn, exclude_header=hid or 0)
+            if bal <= 0:
+                pname = db.scalar(conn, "SELECT item_name FROM m_product WHERE id=:p", p=pid) or bc
+                raise ApiError(f"No stock available for {pname} (Barcode: {bc}) in selected godown/bin. Current stock is 0.")
+            if tot_q > bal:
+                pname = db.scalar(conn, "SELECT item_name FROM m_product WHERE id=:p", p=pid) or bc
+                raise ApiError(f"Insufficient stock for {pname}! Available in stock: {bal}, Attempting to dispatch: {tot_q}. Stock cannot be negative.")
 
 def save_voucher(conn, doc, payload, user_id, hid=None, channel="ui"):
     c = cfg(doc)

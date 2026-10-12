@@ -87,3 +87,23 @@ def report():
             for r in rows:
                 r["free"] = float(r["on_hand"]) - float(r["reserved"])
     return jsonify(rows)
+
+
+@login_required
+def balance():
+    pid = request.args.get("product_id")
+    bc = request.args.get("barcode")
+    gid = request.args.get("godown_id")
+    bno = request.args.get("bin_no")
+    with db.tx() as conn:
+        if bc and gid:
+            bal = db.scalar(conn, "SELECT COALESCE(SUM(qty),0) FROM stock_ledger WHERE barcode=:b AND godown_id=:g AND bin_no=:n", b=bc, g=gid, n=bno or "")
+        elif pid and gid:
+            bal = db.scalar(conn, "SELECT COALESCE(SUM(qty),0) FROM stock_ledger WHERE product_id=:p AND godown_id=:g", p=pid, g=gid)
+        elif pid:
+            bal = db.scalar(conn, "SELECT COALESCE(SUM(qty),0) FROM stock_ledger WHERE product_id=:p", p=pid)
+        elif bc:
+            bal = db.scalar(conn, "SELECT COALESCE(SUM(qty),0) FROM stock_ledger WHERE barcode=:b", b=bc)
+        else:
+            bal = 0
+    return jsonify({"balance": float(bal)})

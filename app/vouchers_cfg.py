@@ -9,7 +9,7 @@ scan   : barcode scanning enabled on the grid
 """
 
 LEDGER_PARTY_CUSTOMER = ["Customer"]
-LEDGER_PARTY_SUPPLIER = ["Supplier", "General", "Jobworker"]
+LEDGER_PARTY_SUPPLIER = ["Supplier", "Jobworker"]
 
 ITEM_COLS = {
     "barcode": dict(label="Barcode", type="text", width=150),

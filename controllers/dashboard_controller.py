@@ -29,7 +29,7 @@ def dashboard():
         low = db.scalar(c, "SELECT COUNT(*) FROM m_product p WHERE p.active=1 AND p.min_stock>0 AND "
                            "COALESCE((SELECT SUM(qty) FROM stock_ledger WHERE product_id=p.id),0) < p.min_stock")
         recent = db.all_(c, "SELECT h.id,h.doc_type,h.voucher_no,h.voucher_date,h.total_value,h.approval_status,pa.name party_name FROM txn_header h "
-                            "JOIN m_ledger pa ON pa.id=h.party_id ORDER BY h.id DESC LIMIT 8")
+                            "JOIN m_ledger pa ON pa.id=h.party_id ORDER BY h.id DESC LIMIT 25")
         counts = {"products": db.scalar(c, "SELECT COUNT(*) FROM m_product WHERE active=1"),
                   "parties": db.scalar(c, "SELECT COUNT(*) FROM m_ledger WHERE active=1 AND ledger_type IN ('Customer','Supplier')"),
                   "stock_pcs": db.scalar(c, "SELECT COALESCE(SUM(qty),0) FROM stock_ledger")}

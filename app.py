@@ -215,6 +215,10 @@ def stock_scan(code):
 def stock_report():
     return stock_controller.report()
 
+@app.route('/api/stock/balance', methods=['GET'])
+def stock_balance():
+    return stock_controller.balance()
+
 @app.route('/api/vouchers/<doc>', methods=['GET'])
 def vouchers_list_(doc):
     return vouchers_controller.list_(doc=doc)
