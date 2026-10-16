@@ -136,7 +136,10 @@ def _query(key, limit=None, offset=0, lookup=False):
     wsql = (" WHERE " + " AND ".join(where)) if where else ""
     with db.tx() as c:
         total = db.scalar(c, f"SELECT COUNT(*) FROM `{m['table']}` t{wsql}", **p)
-        order = f"t.`{label_col(key)}`" if not m.get("hierarchical") else "t.id"
+        if key == "generic_type":
+            order = "CASE t.name WHEN 'Size' THEN 1 WHEN 'Parts' THEN 2 WHEN 'Colour' THEN 3 WHEN 'Pattern' THEN 4 WHEN 'Sleeves' THEN 5 WHEN 'Collection' THEN 6 ELSE 99 END, t.name"
+        else:
+            order = f"t.`{label_col(key)}`" if not m.get("hierarchical") else "t.id"
         lim = f" LIMIT {int(limit)} OFFSET {int(offset)}" if limit and not m.get("hierarchical") else ""
         rows = db.all_(c, f"{base}{wsql} ORDER BY {order}{lim}", **p)
         if m.get("hierarchical"):

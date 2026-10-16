@@ -34,8 +34,8 @@ MASTERS = {
         table="m_generic", label="Generic Masters", group="Basics", icon="button", quick_add=True,
         help="Sizes, colours, parts, patterns, sleeves, collections. Pick a type, or type a new one to add it.",
         fields=[
-            dict(name="type_id", label="Type", type="ref", ref="generic_type", required=True, list=True, quick_add=True),
             T("name", "Name", required=True, list=True),
+            dict(name="type_id", label="Type", type="ref", ref="generic_type", required=True, list=True, quick_add=True),
         ]),
     "uom": dict(
         table="m_uom", label="Units of Measure", group="Basics", icon="tape", quick_add=True,

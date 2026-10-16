@@ -25,7 +25,7 @@ ITEM_COLS = {
     "disc_amt": dict(label="Disc Amt", type="decimal", width=100),
     "net_amount": dict(label="Net Amount", type="decimal", readonly=True, width=120),
     "delivery_date": dict(label="Delivery by", type="date", width=130),
-    "ref_no": dict(label="Order No", type="text", readonly=True, width=120),
+    "ref_no": dict(label="Order Number", type="text", readonly=True, width=130),
     "indent_no": dict(label="Indent / Requisition No", type="text", readonly=True, width=140),
     "src_no": dict(label="Source Doc No", type="text", readonly=True, width=120),
     "salesman_id": dict(label="Salesman", type="ref", ref="ledger", filter={"ledger_type": "Salesman"}, width=140),
@@ -76,8 +76,8 @@ VOUCHERS = {
     "grn": dict(
         label="GRN", plural="Goods Received Notes", kind="GRN", module="Procurement", icon="box",
         party_label="Party Name", party_types=LEDGER_PARTY_SUPPLIER, header=[REMARKS],
-        cols=["barcode", "godown_id", "bin_no", "product_id", "description", "customer_item_name", "qty",
-              "pricelist_id", "rate", "disc_pct", "disc_amt", "net_amount", "ref_no", "indent_no"],
+        cols=["ref_no", "barcode", "godown_id", "bin_no", "product_id", "description", "customer_item_name", "qty",
+              "pricelist_id", "rate", "disc_pct", "disc_amt", "net_amount", "indent_no"],
         source=dict(kind="purchase_order", multi=True, required=False, label="Purchase Orders", no_label="Purchase Order No"),
         stock=1, scan=False, auto_barcode=True),
     "purchase": dict(

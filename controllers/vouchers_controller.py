@@ -6,7 +6,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from flask import g, jsonify, request
 
 from app import db
-from controllers.auth_controller import can, login_required, require
+from controllers.auth_controller import can, can_override_rate, login_required, require
 from app.errors import ApiError
 from app.vouchers_cfg import ITEM_COLS, RATE_IN, RATE_ON, VOUCHERS
 
@@ -160,6 +160,7 @@ def check_voucher_permission(conn, hid, action):
 PENDING_SQL = """
 SELECT * FROM (
  SELECT h.id AS src_header_id, h.voucher_no AS src_no, h.voucher_date AS src_date,
+        h.party_id, pt.name AS party_name,
         h.salesman_id AS h_salesman_id, h.broker_id AS h_broker_id, h.retailer_name AS h_retailer_name,
         sm.name AS h_salesman_label, bk.name AS h_broker_label,
         i.id AS src_item_id, i.barcode, i.godown_id, gd.name AS godown_label, i.bin_no, i.product_id,
@@ -172,6 +173,7 @@ SELECT * FROM (
  FROM txn_item i JOIN txn_header h ON h.id=i.header_id JOIN m_product p ON p.id=i.product_id
  JOIN m_uom u ON u.id=p.uom_id LEFT JOIN m_godown gd ON gd.id=i.godown_id LEFT JOIN m_pricelist pl ON pl.id=i.pricelist_id
  LEFT JOIN m_ledger sm ON sm.id=h.salesman_id LEFT JOIN m_ledger bk ON bk.id=h.broker_id
+ LEFT JOIN m_ledger pt ON pt.id=h.party_id
  WHERE h.doc_type=:kind AND h.approval_status='Approved' {party}
 ) t WHERE pending_qty>0 ORDER BY src_date, src_header_id, src_item_id
 """
@@ -193,11 +195,14 @@ def pending_lines(conn, doc, party_id=None, exclude=0):
         return []
     if src["kind"] == "requisition":
         return db.all_(conn, REQ_PENDING_SQL, excl=exclude)
-    party = " AND h.party_id=:party" if party_id else ""
-    p = {"kind": src["kind"], "excl": exclude}
-    if party_id:
-        p["party"] = party_id
-    return db.all_(conn, PENDING_SQL.format(party=party), **p)
+    if not party_id:
+        return []
+    try:
+        pid = int(party_id)
+    except (ValueError, TypeError):
+        return []
+    p = {"kind": src["kind"], "excl": exclude, "party": pid}
+    return db.all_(conn, PENDING_SQL.format(party=" AND h.party_id=:party"), **p)
 
 def _pending_one(conn, col, item_id, exclude):
     if col == "req_item_id":
@@ -358,6 +363,78 @@ def _validate_stock_lines(conn, doc, c, h, items, hid):
                 pname = db.scalar(conn, "SELECT item_name FROM m_product WHERE id=:p", p=pid) or bc
                 raise ApiError(f"Insufficient stock for {pname}! Available in stock: {bal}, Attempting to dispatch: {tot_q}. Stock cannot be negative.")
 
+def _validate_pricelist_controls(conn, doc, c, h, items, user_id, txn_type_id):
+    if doc not in ("sales_order", "purchase_order"):
+        return
+
+    user_obj = None
+    if user_id:
+        user_row = db.one(conn, "SELECT u.id, u.username, u.role_id, r.name role, r.permissions "
+                                "FROM app_user u JOIN app_role r ON r.id=u.role_id WHERE u.id=:i", i=user_id)
+        if user_row:
+            user_obj = dict(user_row)
+            perms = user_obj.get("permissions")
+            if isinstance(perms, (str, bytes)):
+                user_obj["permissions"] = json.loads(perms)
+
+    user_can_override = can_override_rate(user_obj, doc, txn_type_id)
+    vdate = str(h.get("voucher_date") or "")[:10]
+    party_id = h.get("party_id")
+
+    for it in items:
+        pid = it["product_id"]
+        pname = db.scalar(conn, "SELECT item_name FROM m_product WHERE id=:p", p=pid) or f"Item #{pid}"
+
+        available_pls = db.all_(conn, """
+            SELECT pi.pricelist_id, p.name 
+            FROM m_pricelist_item pi 
+            JOIN m_pricelist p ON p.id = pi.pricelist_id 
+            WHERE pi.product_id = :p AND p.active = 1
+        """, p=pid)
+        has_pricelist = len(available_pls) > 0
+
+        # Price List Validation: If a price list is available, selecting one is mandatory
+        if has_pricelist and not it.get("pricelist_id"):
+            raise ApiError(f"Line {it['line_no']}: Price list is mandatory for '{pname}' as a price list is configured for it", field="items")
+
+        # Rate Field Restriction & Manual Override Rule
+        if it.get("pricelist_id"):
+            pl_item = db.one(conn, """
+                SELECT rate, disc_pct, disc_amt 
+                FROM m_pricelist_item 
+                WHERE pricelist_id = :pl AND product_id = :p 
+                LIMIT 1
+            """, pl=it["pricelist_id"], p=pid)
+            if pl_item:
+                exp_rate = Decimal(str(pl_item["rate"] or 0))
+                exp_disc_pct = Decimal(str(pl_item["disc_pct"] or 0))
+                exp_disc_amt = Decimal(str(pl_item["disc_amt"] or 0))
+
+                if party_id:
+                    party_disc = db.one(conn, """
+                        SELECT d.disc_pct FROM m_ledger_discount d
+                        JOIN m_product prod ON prod.id = :p
+                        WHERE d.ledger_id = :l AND (d.product_group_id = prod.group_id OR d.product_group_id IS NULL)
+                          AND (d.applicable_date IS NULL OR d.applicable_date <= :dt)
+                        ORDER BY d.product_group_id DESC, d.applicable_date DESC LIMIT 1
+                    """, p=pid, l=party_id, dt=vdate)
+                    if party_disc and party_disc["disc_pct"]:
+                        exp_disc_pct = Decimal(str(party_disc["disc_pct"]))
+
+                user_rate = D(it.get("rate"))
+                user_disc_pct = D(it.get("disc_pct"))
+                user_disc_amt = D(it.get("disc_amt"))
+
+                rate_mismatch = abs(user_rate - exp_rate) > Decimal("0.001")
+                disc_pct_mismatch = abs(user_disc_pct - exp_disc_pct) > Decimal("0.001")
+                disc_amt_mismatch = (exp_disc_pct == 0 and abs(user_disc_amt - exp_disc_amt) > Decimal("0.001"))
+
+                if (rate_mismatch or disc_pct_mismatch or disc_amt_mismatch) and not user_can_override:
+                    raise ApiError(
+                        f"Line {it['line_no']}: Manual rate override for '{pname}' is not permitted without rate override permission. Price list rate is {exp_rate}.",
+                        403
+                    )
+
 def save_voucher(conn, doc, payload, user_id, hid=None, channel="ui"):
     c = cfg(doc)
     party = db.one(conn, "SELECT id,ledger_type,active FROM m_ledger WHERE id=:i", i=payload.get("party_id"))
@@ -398,6 +475,7 @@ def save_voucher(conn, doc, payload, user_id, hid=None, channel="ui"):
     ledgers = _clean_ledgers(payload.get("ledgers"))
     _validate_links(conn, doc, c, h, items, hid)
     _validate_stock_lines(conn, doc, c, h, items, hid)
+    _validate_pricelist_controls(conn, doc, c, h, items, user_id, txn_type_id)
     totals = compute(conn, items, ledgers)
     h.update(totals)
 

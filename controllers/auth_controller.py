@@ -13,7 +13,7 @@ from app import db
 from app.errors import ApiError
 
 
-ACTIONS = ["view", "create", "edit", "delete", "approve"]
+ACTIONS = ["view", "create", "edit", "delete", "approve", "override_rate"]
 
 def make_token(user):
     exp = dt.datetime.utcnow() + dt.timedelta(hours=current_app.config["TOKEN_HOURS"])
@@ -54,6 +54,35 @@ def can(user, resource, action):
             t_acts = p.get(f"txn_type_{t['id']}", [])
             if "*" in t_acts or action in t_acts:
                 return True
+    return False
+
+def can_override_rate(user, doc=None, txn_type_id=None):
+    if not user:
+        return False
+    p = user.get("permissions") or {}
+    if "*" in p:
+        return True
+    if user.get("role") == "Admin":
+        return True
+    if "override_rate" in p or "rate_override" in p:
+        return True
+    if doc:
+        acts = p.get(doc, [])
+        if "*" in acts or "override_rate" in acts or "rate_override" in acts:
+            return True
+        from app.vouchers_cfg import VOUCHERS
+        if doc in VOUCHERS:
+            kind = VOUCHERS[doc]["kind"]
+            with db.tx() as c:
+                types = db.all_(c, "SELECT id FROM m_txn_type WHERE txn_kind=:k", k=kind)
+            for t in types:
+                t_acts = p.get(f"txn_type_{t['id']}", [])
+                if "*" in t_acts or "override_rate" in t_acts or "rate_override" in t_acts:
+                    return True
+    if txn_type_id:
+        t_acts = p.get(f"txn_type_{txn_type_id}", [])
+        if "*" in t_acts or "override_rate" in t_acts or "rate_override" in t_acts:
+            return True
     return False
 
 def require(resource, action="view"):
