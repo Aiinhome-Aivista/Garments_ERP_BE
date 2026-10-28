@@ -393,8 +393,8 @@ def _validate_pricelist_controls(conn, doc, c, h, items, user_id, txn_type_id):
         """, p=pid)
         has_pricelist = len(available_pls) > 0
 
-        # Price List Validation: If a price list is available, selecting one is mandatory
-        if has_pricelist and not it.get("pricelist_id"):
+        # Price List Validation: If a price list is available, selecting one is mandatory for purchase_order
+        if doc == "purchase_order" and has_pricelist and not it.get("pricelist_id"):
             raise ApiError(f"Line {it['line_no']}: Price list is mandatory for '{pname}' as a price list is configured for it", field="items")
 
         # Rate Field Restriction & Manual Override Rule

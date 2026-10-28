@@ -57,7 +57,7 @@ VOUCHERS = {
         label="Sales Invoice", plural="Sales Invoices", kind="Sales", module="Sales", icon="receipt",
         party_label="Party Name", party_types=LEDGER_PARTY_CUSTOMER,
         header=[REMARKS],
-        cols=_SALES_LINE, source=dict(kind="challan", multi=False, required=True, link="packing_list_id", label="Packing List", no_label="Packing List No"),
+        cols=_SALES_LINE, source=dict(kind="challan", multi=True, required=True, label="Packing Lists", no_label="Packing List No"),
         stock=0, scan=False),
     "sales_return": dict(
         label="Sales Return (Credit Note)", plural="Sales Returns", kind="Sales Return", module="Sales", icon="return",

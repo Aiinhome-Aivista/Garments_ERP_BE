@@ -21,8 +21,9 @@ def dashboard():
             "grn_uninvoiced": db.scalar(c, "SELECT COUNT(DISTINCT src_header_id) FROM (SELECT h.id src_header_id, i.qty - COALESCE((SELECT SUM(x.qty) FROM txn_item x "
                                            "JOIN txn_header xh ON xh.id=x.header_id WHERE x.src_item_id=i.id AND xh.approval_status<>'Rejected'),0) pend "
                                            "FROM txn_item i JOIN txn_header h ON h.id=i.header_id WHERE h.doc_type='grn' AND h.approval_status='Approved') t WHERE pend>0"),
-            "challan_uninvoiced": db.scalar(c, "SELECT COUNT(*) FROM txn_header h WHERE h.doc_type='challan' AND h.approval_status='Approved' "
-                                               "AND NOT EXISTS (SELECT 1 FROM txn_header s WHERE s.packing_list_id=h.id AND s.approval_status<>'Rejected')"),
+            "challan_uninvoiced": db.scalar(c, "SELECT COUNT(DISTINCT src_header_id) FROM (SELECT h.id src_header_id, i.qty - COALESCE((SELECT SUM(x.qty) FROM txn_item x "
+                                               "JOIN txn_header xh ON xh.id=x.header_id WHERE x.src_item_id=i.id AND xh.approval_status<>'Rejected'),0) pend "
+                                               "FROM txn_item i JOIN txn_header h ON h.id=i.header_id WHERE h.doc_type='challan' AND h.approval_status='Approved') t WHERE pend>0"),
         }
         sales = db.all_(c, "SELECT DATE_FORMAT(voucher_date,'%Y-%m') ym, SUM(total_value) v FROM txn_header WHERE doc_type='sales' AND approval_status='Approved' "
                            "AND voucher_date >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH) GROUP BY ym ORDER BY ym")
