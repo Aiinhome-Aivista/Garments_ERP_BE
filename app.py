@@ -336,6 +336,6 @@ register_cli(app)
 if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
-        port=5055,
+        port=5007,
         debug=True
     )
