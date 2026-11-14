@@ -139,6 +139,10 @@ def integrations_packing_list():
 def masters_list_(key):
     return masters_controller.list_(key=key)
 
+@app.route('/api/masters/<key>/next-no', methods=['GET'])
+def masters_next_no(key):
+    return masters_controller.next_no(key=key)
+
 @app.route('/api/lookup/<key>', methods=['GET'])
 def masters_lookup(key):
     return masters_controller.lookup(key=key)
@@ -267,6 +271,10 @@ def vouchers_action_(doc, hid, action):
 def vouchers_pending_(doc):
     return vouchers_controller.pending_(doc=doc)
 
+@app.route('/api/vouchers/<doc>/source-ledgers', methods=['GET', 'POST'])
+def vouchers_source_ledgers(doc):
+    return vouchers_controller.source_ledgers(doc=doc)
+
 @app.route('/api/vouchers/<doc>/gst-suggest', methods=['POST'])
 def vouchers_gst_(doc):
     return vouchers_controller.gst_(doc=doc)
@@ -352,6 +360,7 @@ register_cli(app)
 if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
-        port=5007,
+        # port=5007,
+        port=8000,
         debug=True
     )

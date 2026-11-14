@@ -54,6 +54,26 @@ def scan(code):
     return jsonify({"kind": kind, "product": prod, "lots": lots, "ref_item": ref_item})
 
 
+def make_composite_str(qty_val, main_uom, alt_uoms):
+    if not alt_uoms:
+        return None
+    q = float(qty_val or 0)
+    if q <= 0:
+        return None
+    cand = next((a for a in alt_uoms if float(a.get("conversion_factor") or 1) > 1), alt_uoms[0])
+    factor = float(cand.get("conversion_factor") or 1)
+    if factor <= 1:
+        return None
+    alt_name = cand.get("name") or "ALT"
+    alt_qty = int(q // factor)
+    rem = round(q % factor, 3)
+    if alt_qty > 0 and rem > 0:
+        return f"{alt_qty} {alt_name} + {rem:g} {main_uom}"
+    elif alt_qty > 0:
+        return f"{alt_qty} {alt_name}"
+    return f"{rem:g} {main_uom}"
+
+
 @require("stock_report", "view")
 def report():
     a = request.args
@@ -69,10 +89,14 @@ def report():
             if a.get("s_bin_no"): where.append("s.bin_no LIKE :s_bin_no"); p["s_bin_no"] = f"%{a['s_bin_no']}%"
             where_str = " AND ".join(where)
             
-            rows = db.all_(conn, f"SELECT s.barcode,p.item_name,g.name godown,s.bin_no,SUM(s.qty) balance,u.name uom,MIN(s.txn_date) since "
+            rows = db.all_(conn, f"SELECT s.barcode,p.id product_id,p.item_name,g.name godown,s.bin_no,SUM(s.qty) balance,u.name uom,MIN(s.txn_date) since "
                                  f"FROM stock_ledger s JOIN m_product p ON p.id=s.product_id JOIN m_godown g ON g.id=s.godown_id "
                                  f"JOIN m_uom u ON u.id=p.uom_id WHERE {where_str} "
-                                 f"GROUP BY s.barcode,p.item_name,g.name,s.bin_no,u.name HAVING SUM(s.qty)<>0 ORDER BY p.item_name,since LIMIT 1000", **p)
+                                 f"GROUP BY s.barcode,p.id,p.item_name,g.name,s.bin_no,u.name HAVING SUM(s.qty)<>0 ORDER BY p.item_name,since LIMIT 1000", **p)
+            for r in rows:
+                alts = db.all_(conn, "SELECT pu.uom_id, u.name, pu.conversion_factor FROM m_product_uom pu JOIN m_uom u ON u.id=pu.uom_id WHERE pu.product_id=:pid ORDER BY pu.conversion_factor DESC", pid=r["product_id"])
+                r["alternate_uoms"] = alts
+                r["composite"] = make_composite_str(r["balance"], r["uom"], alts)
         else:
             where = ["(p.item_name LIKE :q OR c.name LIKE :q)"]
             if a.get("s_item_name"): where.append("p.item_name LIKE :s_item_name"); p["s_item_name"] = f"%{a['s_item_name']}%"
@@ -86,6 +110,10 @@ def report():
                                  f"WHERE p.active=1 AND {where_str} ORDER BY p.item_name LIMIT 1000", **p)
             for r in rows:
                 r["free"] = float(r["on_hand"]) - float(r["reserved"])
+                alts = db.all_(conn, "SELECT pu.uom_id, u.name, pu.conversion_factor FROM m_product_uom pu JOIN m_uom u ON u.id=pu.uom_id WHERE pu.product_id=:pid ORDER BY pu.conversion_factor DESC", pid=r["product_id"])
+                r["alternate_uoms"] = alts
+                r["composite_on_hand"] = make_composite_str(r["on_hand"], r["uom"], alts)
+                r["composite_free"] = make_composite_str(r["free"], r["uom"], alts)
     return jsonify(rows)
 
 

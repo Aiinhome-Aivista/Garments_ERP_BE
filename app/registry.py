@@ -40,7 +40,8 @@ MASTERS = {
     "uom": dict(
         table="m_uom", label="Units of Measure", group="Basics", icon="tape", quick_add=True,
         fields=[T("name", "UOM Name", required=True, list=True),
-                dict(name="decimals", label="Decimals", type="int", default=0, list=True)]),
+                dict(name="decimals", label="Decimals", type="int", default=0, list=True),
+                dict(name="allow_fraction", label="Allow Fractional Quantity", type="bool", default=False, list=True)]),
     "branch": dict(
         table="m_branch", label="Branches", group="Basics", icon="factory",
         fields=[T("name", "Branch Name", required=True, list=True),
@@ -57,15 +58,39 @@ MASTERS = {
     "machine": dict(
         table="m_machine", label="Machines", group="Production", icon="machine",
         fields=[T("name", "Machine Name", required=True, list=True)]),
+    "bom": dict(
+        table="m_bom", label="BOM Master", group="Production", icon="layers", label_col="bom_no", hook="bom",
+        help="Bill of Materials: Define components and raw materials required to manufacture a finished garment.",
+        fields=[
+            dict(name="bom_no", label="BOM No.", type="readonly", default="", list=True, unique=True),
+            dict(name="bom_name", label="BOM Name", type="text", required=True, list=True),
+            dict(name="product_id", label="Components of", type="ref", ref="product", required=True, list=True),
+            dict(name="batch_qty", label="Quantity", type="decimal", default=1, required=True, list=True),
+            dict(name="uom_id", label="UOM", type="ref", ref="uom", required=True, list=True),
+            T("remarks", "Remarks"),
+        ],
+        children=[dict(
+            key="items", table="m_bom_item", fk="bom_id", label="BOM Components",
+            order="seq", seq_col="seq",
+            fields=[
+                dict(name="material_id", label="Item", type="ref", ref="product", required=True),
+                dict(name="godown_id", label="Godown", type="ref", ref="godown"),
+                dict(name="item_type", label="Type of Item", type="text"),
+                dict(name="qty_per_unit", label="Quantity", type="decimal", default=0, required=True),
+                dict(name="rate", label="Rate", type="decimal", default=0),
+                dict(name="wastage_pct", label="Rate (%)", type="decimal", default=0),
+                T("remarks", "Remarks"),
+            ])],
+    ),
 
     # ---------------------------------------------------------------- products
     "product_category": dict(
         table="m_product_category", label="Product Categories", group="Products", icon="hanger",
-        help="e.g. FG, RM, Consumables. Define up to four attributes; List attributes pull from a generic master type.",
+        help="e.g. FG, RM, Consumables. Define attributes; List attributes pull from a generic master type.",
         fields=[T("name", "Category Name", required=True, list=True)],
         children=[dict(
             key="attributes", table="m_product_category_attr", fk="category_id", label="Attribute Definition",
-            order="attr_no", seq_col="attr_no", max_rows=4,
+            order="attr_no", seq_col="attr_no",
             fields=[T("label", "Attribute Label", required=True),
                     dict(name="mode", label="Manual / List", type="select", options=["List", "Manual"], default="List", required=True),
                     dict(name="generic_type_id", label="Connected Master", type="ref", ref="generic_type",
@@ -86,13 +111,21 @@ MASTERS = {
             dict(name="attr_values", label="Attributes", type="attrs", depends="category_id"),
             dict(name="default_sales_ledger_id", label="Default Sales Ledger", type="ref", ref="ledger", filter={"ledger_type": "Sales"}),
             dict(name="default_purchase_ledger_id", label="Default Purchase Ledger", type="ref", ref="ledger", filter={"ledger_type": "Purchase"}),
-            dict(name="gst_rate", label="Gst Rate %", type="decimal", default=0),
+            dict(name="gst_type", label="GST Type", type="select", options=["Flat", "Slab"], default="Flat", no_empty=True, list=True),
+            dict(name="gst_rate", label="Gst Rate %", type="decimal", default=0, show_if={"gst_type": ["Flat"]}),
             T("hsn_code", "HSN Code"),
             dict(name="package_qty", label="Package Qty", type="decimal"),
             dict(name="min_stock", label="Minimum Stock Level", type="decimal",
                  help="Used by 'Requisition for PO' to suggest re-orders"),
         ],
         children=[
+            dict(key="gst_slabs", table="m_product_gst_slab", fk="product_id", label="GST Slabs (Amount / Price Range Based)",
+                 fields=[dict(name="min_price", label="Minimum Amount", type="decimal", default=0, required=True),
+                         dict(name="max_price", label="Maximum Amount", type="decimal"),
+                         dict(name="gst_rate", label="GST Percentage (%)", type="decimal", default=0, required=True)]),
+            dict(key="alternate_uoms", table="m_product_uom", fk="product_id", label="Alternate Units of Measurement (Multi-UOM)",
+                 fields=[dict(name="uom_id", label="Alternate UOM", type="ref", ref="uom", required=True),
+                         dict(name="conversion_factor", label="Conversion Factor", type="decimal", default=1, required=True)]),
             dict(key="customers", table="m_product_customer", fk="product_id", label="Connected Customers",
                  fields=[dict(name="customer_id", label="Customer", type="ref", ref="ledger",
                               filter={"ledger_type": "Customer"}, required=True),

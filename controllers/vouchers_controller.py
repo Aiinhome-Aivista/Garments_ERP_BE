@@ -54,6 +54,35 @@ def next_number(conn, txn_type_id, kind, commit=True):
 
 
 # ------------------------------------------------------------------ totals
+def resolve_product_gst_rate(conn, product_id, taxable_price):
+    """
+    Determine the applicable GST percentage for a product:
+    - If GST Type is Flat: returns product's gst_rate
+    - If GST Type is Slab: finds matching slab based on taxable_price (min_price <= taxable_price <= max_price)
+    """
+    if not product_id:
+        return Decimal(0)
+    p = db.one(conn, "SELECT gst_type, gst_rate FROM m_product WHERE id=:i", i=product_id)
+    if not p:
+        return Decimal(0)
+    if (p.get("gst_type") or "Flat") == "Flat":
+        return D(p.get("gst_rate") or 0)
+    
+    # Slab Rate
+    price = D(taxable_price)
+    slabs = db.all_(conn, "SELECT min_price, max_price, gst_rate FROM m_product_gst_slab WHERE product_id=:p ORDER BY min_price ASC", p=product_id)
+    for s in slabs:
+        min_p = D(s.get("min_price") or 0)
+        max_p = D(s["max_price"]) if s.get("max_price") is not None else None
+        if max_p is not None:
+            if min_p <= price <= max_p:
+                return D(s.get("gst_rate") or 0)
+        else:
+            if price >= min_p:
+                return D(s.get("gst_rate") or 0)
+    # If no slab matched, return default gst_rate if set, else 0
+    return D(p.get("gst_rate") or 0)
+
 def compute(conn, items, ledgers):
     """Recalculate line nets, ledger amounts and totals. Mutates rows, returns totals."""
     tq = pv = Decimal(0)
@@ -66,34 +95,142 @@ def compute(conn, items, ledgers):
         it["net_amount"] = q2(gross - da)
         tq += qty
         pv += it["net_amount"]
-    types = {}
-    for l in ledgers:
-        if l["ledger_id"] not in types:
-            types[l["ledger_id"]] = db.scalar(conn, "SELECT ledger_type FROM m_ledger WHERE id=:i", i=l["ledger_id"])
 
-    def amount(l, base_val):
-        rate, on, inn = D(l["rate"]), l["rate_on"], l["rate_in"]
-        if on == "auto":
+        gst_pct = D(it.get("gst_rate"))
+        if (gst_pct is None or gst_pct == 0) and it.get("product_id"):
+            eff_rate = it["net_amount"] / qty if qty > 0 else D(it.get("rate") or 0)
+            gst_pct = resolve_product_gst_rate(conn, it["product_id"], eff_rate)
+        it["gst_rate"] = gst_pct
+
+    types = {}
+    tax_types = {}
+    for l in ledgers:
+        lid = l.get("ledger_id")
+        if lid and lid not in types:
+            r = db.one(conn, "SELECT ledger_type, tax_type, name FROM m_ledger WHERE id=:i", i=lid)
+            if r:
+                types[lid] = r["ledger_type"]
+                tt = r.get("tax_type")
+                if not tt:
+                    nm = (r.get("name") or "").upper()
+                    if "CGST" in nm: tt = "CGST"
+                    elif "SGST" in nm: tt = "SGST"
+                    elif "IGST" in nm: tt = "IGST"
+                tax_types[lid] = tt
+            else:
+                types[lid] = "General"
+                tax_types[lid] = None
+
+    def calc_general_ledger_amt(l, base_val):
+        lid = l.get("ledger_id")
+        rate = D(l.get("rate"))
+        on = l.get("rate_on") or "auto"
+        inn = l.get("rate_in") or "value"
+        if on == "auto" or not l.get("rate_on"):
             a = rate
         elif inn == "value":
             a = rate * tq if on == "total_qty" else rate
         else:
-            a = base_val * rate / 100
+            a = base_val * rate / Decimal(100)
         a = q2(a)
-        return -abs(a) if types.get(l["ledger_id"]) == "Discount" else a
+        return -abs(a) if types.get(lid) == "Discount" else a
 
-    running = pv
-    for l in ledgers:                                     # pass 1: everything except "net value" lines
-        if l["rate_on"] == "net_value":
+    # 1. Calculate non-GST ledgers marked as before_gst
+    before_gst_ledger_total = Decimal(0)
+    running_before = pv
+    for l in ledgers:
+        lid = l.get("ledger_id")
+        tt = tax_types.get(lid) or l.get("tax_type")
+        if tt in ("CGST", "SGST", "IGST"):
             continue
-        base = {"total_qty": tq, "total_product_value": pv, "current_subtotal": running}.get(l["rate_on"], Decimal(0))
-        l["amount"] = amount(l, base)
-        running += l["amount"]
-    netv = running
-    for l in ledgers:                                     # pass 2: "net value" lines
-        if l["rate_on"] == "net_value":
-            l["amount"] = amount(l, netv)
+        pos = l.get("gst_position") or "after_gst"
+        if pos == "before_gst":
+            base = {"total_qty": tq, "total_product_value": pv, "current_subtotal": running_before}.get(l.get("rate_on"), pv)
+            l["amount"] = calc_general_ledger_amt(l, base)
+            running_before += l["amount"]
+            before_gst_ledger_total += l["amount"]
+
+    # 2. Compute GST on items + proportionate before_gst additions
+    # Taxable amount for GST = Item net_amount + (Item net_amount / Total Item Product Value * Before GST Ledgers)
+    total_gst = Decimal(0)
+    for it in items:
+        item_net = it["net_amount"]
+        prop_charge = Decimal(0)
+        if pv > Decimal(0):
+            prop_charge = item_net / pv * before_gst_ledger_total
+        elif len(items) > 0:
+            prop_charge = before_gst_ledger_total / Decimal(len(items))
+        line_taxable = item_net + prop_charge
+        gst_pct = D(it.get("gst_rate"))
+        item_gst = q2(line_taxable * gst_pct / Decimal(100))
+        total_gst += item_gst
+
+    # 3. Calculate GST ledgers
+    for l in ledgers:
+        lid = l.get("ledger_id")
+        tt = tax_types.get(lid) or l.get("tax_type")
+        if tt == "CGST":
+            a = q2(total_gst / Decimal(2))
+            l["rate"] = a
+            l["amount"] = a
+            l["rate_in"] = "value"
+            l["rate_on"] = "auto"
+        elif tt == "SGST":
+            a = q2(total_gst / Decimal(2))
+            l["rate"] = a
+            l["amount"] = a
+            l["rate_in"] = "value"
+            l["rate_on"] = "auto"
+        elif tt == "IGST":
+            a = q2(total_gst)
+            l["rate"] = a
+            l["amount"] = a
+            l["rate_in"] = "value"
+            l["rate_on"] = "auto"
+
+    # 4. Total running amount across all ledgers
+    # Start with pv (items net total)
+    running = pv
+    # Pass 1: before_gst ledgers
+    for l in ledgers:
+        lid = l.get("ledger_id")
+        tt = tax_types.get(lid) or l.get("tax_type")
+        if tt in ("CGST", "SGST", "IGST"):
+            continue
+        if (l.get("gst_position") or "after_gst") == "before_gst":
             running += l["amount"]
+
+    # Pass 2: GST ledgers
+    for l in ledgers:
+        lid = l.get("ledger_id")
+        tt = tax_types.get(lid) or l.get("tax_type")
+        if tt in ("CGST", "SGST", "IGST"):
+            running += l["amount"]
+
+    # Pass 3: after_gst ledgers (except net_value)
+    for l in ledgers:
+        lid = l.get("ledger_id")
+        tt = tax_types.get(lid) or l.get("tax_type")
+        if tt in ("CGST", "SGST", "IGST"):
+            continue
+        if (l.get("gst_position") or "after_gst") != "before_gst":
+            if l.get("rate_on") == "net_value":
+                continue
+            base = {"total_qty": tq, "total_product_value": pv, "current_subtotal": running}.get(l.get("rate_on"), pv)
+            l["amount"] = calc_general_ledger_amt(l, base)
+            running += l["amount"]
+
+    # Pass 4: net_value ledgers
+    netv = running
+    for l in ledgers:
+        lid = l.get("ledger_id")
+        tt = tax_types.get(lid) or l.get("tax_type")
+        if tt in ("CGST", "SGST", "IGST"):
+            continue
+        if (l.get("gst_position") or "after_gst") != "before_gst" and l.get("rate_on") == "net_value":
+            l["amount"] = calc_general_ledger_amt(l, netv)
+            running += l["amount"]
+
     return {"total_qty": tq, "total_product_value": q2(pv), "total_value": q2(running)}
 
 
@@ -112,12 +249,19 @@ LEFT JOIN m_ledger tr ON tr.id=h.transporter_id
 """
 
 ITEM_SQL = """
-SELECT i.*, p.item_name AS `product_id__label`, p.gst_rate, p.barcode AS product_barcode, u.name AS uom,
+SELECT i.*, p.item_name AS `product_id__label`, COALESCE(i.gst_rate, p.gst_rate, 0) AS gst_rate, p.barcode AS product_barcode,
+       COALESCE(tu.name, u.name) AS uom, COALESCE(tu.name, u.name) AS uom_name,
+       p.uom_id AS main_uom_id, u.name AS main_uom_name,
        gd.name AS `godown_id__label`, pl.name AS `pricelist_id__label`, sm.name AS `salesman_id__label`,
        bk.name AS `broker_id__label`, sh.voucher_no AS src_no
-FROM txn_item i JOIN m_product p ON p.id=i.product_id JOIN m_uom u ON u.id=p.uom_id
-LEFT JOIN m_godown gd ON gd.id=i.godown_id LEFT JOIN m_pricelist pl ON pl.id=i.pricelist_id
-LEFT JOIN m_ledger sm ON sm.id=i.salesman_id LEFT JOIN m_ledger bk ON bk.id=i.broker_id
+FROM txn_item i
+JOIN m_product p ON p.id=i.product_id
+JOIN m_uom u ON u.id=p.uom_id
+LEFT JOIN m_uom tu ON tu.id=i.uom_id
+LEFT JOIN m_godown gd ON gd.id=i.godown_id
+LEFT JOIN m_pricelist pl ON pl.id=i.pricelist_id
+LEFT JOIN m_ledger sm ON sm.id=i.salesman_id
+LEFT JOIN m_ledger bk ON bk.id=i.broker_id
 LEFT JOIN txn_header sh ON sh.id=i.src_header_id
 WHERE i.header_id=:h ORDER BY i.line_no
 """
@@ -132,12 +276,43 @@ def used_downstream(conn, hid, strict=False):
                          "WHERE po.order_id=:h AND pp.status='Accepted'", h=hid)
     return n > 0
 
+def _fetch_product_uoms_map(conn, pids):
+    prod_uoms = {}
+    if not pids:
+        return prod_uoms
+    for pid in set(pids):
+        p_row = db.one(conn, "SELECT p.id, p.uom_id, u.name, u.allow_fraction FROM m_product p JOIN m_uom u ON u.id=p.uom_id WHERE p.id=:id", id=pid)
+        if p_row:
+            ulist = [{
+                "uom_id": p_row["uom_id"],
+                "name": p_row["name"],
+                "conversion_factor": 1.0,
+                "is_main": True,
+                "allow_fraction": bool(p_row.get("allow_fraction"))
+            }]
+            alts = db.all_(conn, "SELECT pu.uom_id, u.name, pu.conversion_factor, u.allow_fraction FROM m_product_uom pu JOIN m_uom u ON u.id=pu.uom_id WHERE pu.product_id=:pid ORDER BY u.name", pid=pid)
+            for a in alts:
+                ulist.append({
+                    "uom_id": a["uom_id"],
+                    "name": a["name"],
+                    "conversion_factor": float(a["conversion_factor"]),
+                    "is_main": False,
+                    "allow_fraction": bool(a.get("allow_fraction"))
+                })
+            prod_uoms[pid] = ulist
+    return prod_uoms
+
+
 def get_voucher(conn, hid, doc=None):
     h = db.one(conn, HDR_SQL + " WHERE h.id=:i", i=hid)
     if not h or (doc and h["doc_type"] != doc):
         raise ApiError("Voucher not found", 404)
-    h["items"] = db.all_(conn, ITEM_SQL, h=hid)
-    h["ledgers"] = db.all_(conn, "SELECT l.*, m.name AS `ledger_id__label`, m.ledger_type FROM txn_ledger l "
+    items = db.all_(conn, ITEM_SQL, h=hid)
+    uoms_map = _fetch_product_uoms_map(conn, [it["product_id"] for it in items if it.get("product_id")])
+    for it in items:
+        it["available_uoms"] = uoms_map.get(it["product_id"], [])
+    h["items"] = items
+    h["ledgers"] = db.all_(conn, "SELECT l.*, m.name AS `ledger_id__label`, m.ledger_type, m.tax_type FROM txn_ledger l "
                                  "JOIN m_ledger m ON m.id=l.ledger_id WHERE l.header_id=:h ORDER BY l.line_no", h=hid)
     terms = db.all_(conn, "SELECT kind,sl_no,description FROM txn_terms WHERE header_id=:h ORDER BY kind,sl_no", h=hid)
     h["terms"] = [t for t in terms if t["kind"] == "terms"]
@@ -164,14 +339,17 @@ SELECT * FROM (
         h.salesman_id AS h_salesman_id, h.broker_id AS h_broker_id, h.retailer_name AS h_retailer_name,
         sm.name AS h_salesman_label, bk.name AS h_broker_label,
         i.id AS src_item_id, i.barcode, i.godown_id, gd.name AS godown_label, i.bin_no, i.product_id,
-        p.item_name, p.gst_rate, u.name AS uom, i.description, i.customer_item_name, i.pricelist_id,
+        p.item_name, COALESCE(i.gst_rate, p.gst_rate, 0) AS gst_rate,
+        COALESCE(tu.name, u.name) AS uom, i.uom_id, i.factor, i.primary_qty,
+        i.description, i.customer_item_name, i.pricelist_id,
         pl.name AS pricelist_label, i.rate, i.disc_pct, i.disc_amt, i.delivery_date, i.ref_no, i.indent_no,
         i.salesman_id, i.broker_id, i.retailer_name, i.req_item_id,
-        i.qty - COALESCE((SELECT SUM(x.qty) FROM txn_item x JOIN txn_header xh ON xh.id=x.header_id
-                          WHERE x.src_item_id=i.id AND xh.approval_status<>'Rejected' AND xh.id<>:excl),0) AS pending_qty,
+        ROUND(i.qty - COALESCE((SELECT SUM(x.qty * COALESCE(x.factor, 1.0)) FROM txn_item x JOIN txn_header xh ON xh.id=x.header_id
+                          WHERE x.src_item_id=i.id AND xh.approval_status<>'Rejected' AND xh.id<>:excl),0) / COALESCE(i.factor, 1.0), 3) AS pending_qty,
         COALESCE((SELECT SUM(s.qty) FROM stock_ledger s WHERE s.product_id=i.product_id),0) AS stock_qty
  FROM txn_item i JOIN txn_header h ON h.id=i.header_id JOIN m_product p ON p.id=i.product_id
- JOIN m_uom u ON u.id=p.uom_id LEFT JOIN m_godown gd ON gd.id=i.godown_id LEFT JOIN m_pricelist pl ON pl.id=i.pricelist_id
+ JOIN m_uom u ON u.id=p.uom_id LEFT JOIN m_uom tu ON tu.id=i.uom_id
+ LEFT JOIN m_godown gd ON gd.id=i.godown_id LEFT JOIN m_pricelist pl ON pl.id=i.pricelist_id
  LEFT JOIN m_ledger sm ON sm.id=h.salesman_id LEFT JOIN m_ledger bk ON bk.id=h.broker_id
  LEFT JOIN m_ledger pt ON pt.id=h.party_id
  WHERE h.doc_type=:kind AND h.approval_status='Approved' {party}
@@ -182,8 +360,8 @@ REQ_PENDING_SQL = """
 SELECT * FROM (
  SELECT r.id AS src_header_id, r.req_no AS src_no, r.req_date AS src_date, ri.id AS req_item_id, ri.product_id,
         p.item_name, p.gst_rate, u.name AS uom, r.req_no AS indent_no,
-        ri.qty - COALESCE((SELECT SUM(x.qty) FROM txn_item x JOIN txn_header xh ON xh.id=x.header_id
-                           WHERE x.req_item_id=ri.id AND xh.approval_status<>'Rejected' AND xh.id<>:excl),0) AS pending_qty
+        ROUND(ri.qty - COALESCE((SELECT SUM(x.qty * COALESCE(x.factor, 1.0)) FROM txn_item x JOIN txn_header xh ON xh.id=x.header_id
+                           WHERE x.req_item_id=ri.id AND xh.approval_status<>'Rejected' AND xh.id<>:excl),0), 3) AS pending_qty
  FROM requisition_item ri JOIN requisition r ON r.id=ri.requisition_id JOIN m_product p ON p.id=ri.product_id
  JOIN m_uom u ON u.id=p.uom_id WHERE r.status='Open'
 ) t WHERE pending_qty>0 ORDER BY src_date, src_header_id
@@ -194,26 +372,36 @@ def pending_lines(conn, doc, party_id=None, exclude=0):
     if not src:
         return []
     if src["kind"] == "requisition":
-        return db.all_(conn, REQ_PENDING_SQL, excl=exclude)
-    if not party_id:
-        return []
-    try:
-        pid = int(party_id)
-    except (ValueError, TypeError):
-        return []
-    p = {"kind": src["kind"], "excl": exclude, "party": pid}
-    return db.all_(conn, PENDING_SQL.format(party=" AND h.party_id=:party"), **p)
+        rows = db.all_(conn, REQ_PENDING_SQL, excl=exclude)
+    else:
+        if not party_id:
+            return []
+        try:
+            pid = int(party_id)
+        except (ValueError, TypeError):
+            return []
+        p = {"kind": src["kind"], "excl": exclude, "party": pid}
+        rows = db.all_(conn, PENDING_SQL.format(party=" AND h.party_id=:party"), **p)
+    uoms_map = _fetch_product_uoms_map(conn, [it["product_id"] for it in rows if it.get("product_id")])
+    for it in rows:
+        it["available_uoms"] = uoms_map.get(it["product_id"], [])
+    return rows
 
 def _pending_one(conn, col, item_id, exclude):
     if col == "req_item_id":
-        base = db.scalar(conn, "SELECT qty FROM requisition_item WHERE id=:i", i=item_id)
+        base_qty = db.scalar(conn, "SELECT qty FROM requisition_item WHERE id=:i", i=item_id)
+        src_factor = D(1)
     else:
-        base = db.scalar(conn, "SELECT qty FROM txn_item WHERE id=:i", i=item_id)
-    if base is None:
+        row = db.one(conn, "SELECT qty, factor FROM txn_item WHERE id=:i", i=item_id)
+        if not row:
+            raise ApiError("A source line no longer exists")
+        base_qty = row["qty"]
+        src_factor = D(row.get("factor") or 1)
+    if base_qty is None:
         raise ApiError("A source line no longer exists")
-    used = db.scalar(conn, f"SELECT COALESCE(SUM(x.qty),0) FROM txn_item x JOIN txn_header xh ON xh.id=x.header_id "
-                           f"WHERE x.`{col}`=:i AND xh.approval_status<>'Rejected' AND xh.id<>:e", i=item_id, e=exclude)
-    return D(base) - D(used)
+    used_primary = db.scalar(conn, f"SELECT COALESCE(SUM(x.qty * COALESCE(x.factor, 1.0)),0) FROM txn_item x JOIN txn_header xh ON xh.id=x.header_id "
+                                   f"WHERE x.`{col}`=:i AND xh.approval_status<>'Rejected' AND xh.id<>:e", i=item_id, e=exclude)
+    return (D(base_qty) * src_factor) - D(used_primary)
 
 
 # ------------------------------------------------------------------ stock helpers
@@ -230,10 +418,13 @@ def post_stock(conn, h, c):
         key = (it["barcode"], it["godown_id"], it["bin_no"] or "")
         if not it["barcode"] or not it["godown_id"]:
             raise ApiError(f"Line {it['line_no']}: barcode and godown are needed to move stock")
-        need[key] = need.get(key, 0) + D(it["qty"])
+        factor = D(it.get("factor") or 1)
+        base_qty = D(it["qty"]) * factor
+        need[key] = need.get(key, 0) + base_qty
         db.insert(conn, "stock_ledger", {"header_id": h["id"], "item_id": it["id"], "txn_date": h["voucher_date"],
                                          "product_id": it["product_id"], "barcode": it["barcode"], "godown_id": it["godown_id"],
-                                         "bin_no": it["bin_no"] or "", "qty": D(it["qty"]) * sign})
+                                         "bin_no": it["bin_no"] or "", "qty": base_qty * sign,
+                                         "txn_qty": D(it["qty"]) * sign, "uom_id": it.get("uom_id"), "factor": factor})
     if sign < 0:
         for (bc, gd, bn), q in need.items():
             if lot_balance(conn, bc, gd, bn) < 0:
@@ -259,15 +450,57 @@ def _clean_items(conn, doc, c, raw):
         qty = D(r.get("qty"))
         if qty <= 0:
             raise ApiError(f"Line {n}: quantity must be more than zero")
-        it = {"line_no": n, "product_id": int(pid), "qty": qty}
+
+        # Multi-UOM Resolution & Quantity Validation
+        prod = db.one(conn, "SELECT p.uom_id, u.name uom_name, u.decimals, u.allow_fraction FROM m_product p JOIN m_uom u ON u.id=p.uom_id WHERE p.id=:p", p=pid)
+        main_uom_id = prod["uom_id"] if prod else None
+        
+        req_uom_id = r.get("uom_id")
+        if not req_uom_id:
+            req_uom_id = main_uom_id
+        else:
+            req_uom_id = int(req_uom_id)
+
+        # Look up conversion factor and UOM rule
+        uom_info = db.one(conn, "SELECT id, name, decimals, allow_fraction FROM m_uom WHERE id=:u", u=req_uom_id)
+        if not uom_info:
+            raise ApiError(f"Line {n}: Invalid UOM selected")
+
+        # Configurable fractional / whole-unit validation:
+        # If allow_fraction is false/0 and decimals is 0, quantity must be a whole number
+        allows_fraction = bool(uom_info.get("allow_fraction") or (uom_info.get("decimals") or 0) > 0)
+        if not allows_fraction:
+            if qty % Decimal(1) != Decimal(0):
+                raise ApiError(f"Line {n}: UOM '{uom_info['name']}' does not allow fractional quantities. Please enter a whole number.")
+
+        factor = Decimal("1.0000")
+        if req_uom_id != main_uom_id:
+            conv = db.scalar(conn, "SELECT conversion_factor FROM m_product_uom WHERE product_id=:p AND uom_id=:u", p=pid, u=req_uom_id)
+            if conv is None or Decimal(str(conv)) <= 0:
+                raise ApiError(f"Line {n}: No conversion factor configured for UOM '{uom_info['name']}' on this item")
+            factor = Decimal(str(conv))
+
+        primary_qty = q2(qty * factor)
+
+        it = {
+            "line_no": n,
+            "product_id": int(pid),
+            "qty": qty,
+            "uom_id": req_uom_id,
+            "factor": factor,
+            "primary_qty": primary_qty,
+        }
         for k in ("barcode", "bin_no", "description", "customer_item_name", "retailer_name", "ref_no", "indent_no"):
             v = (r.get(k) or "").strip() if isinstance(r.get(k), str) else r.get(k)
             it[k] = v or None
         for k in ("godown_id", "pricelist_id", "salesman_id", "broker_id", "src_header_id", "src_item_id", "req_item_id"):
             it[k] = int(r[k]) if r.get(k) else None
         it["delivery_date"] = str(r["delivery_date"])[:10] if r.get("delivery_date") else None
-        for k in ("rate", "disc_pct", "disc_amt"):
+        for k in ("rate", "disc_pct", "disc_amt", "gst_rate"):
             it[k] = D(r.get(k))
+        if (it.get("gst_rate") is None or it.get("gst_rate") == 0) and it.get("product_id"):
+            eff_rate = it["rate"]
+            it["gst_rate"] = resolve_product_gst_rate(conn, it["product_id"], eff_rate)
         items.append(it)
     return items
 
@@ -278,8 +511,10 @@ def _clean_ledgers(raw):
             continue
         if (r.get("rate_in") or "percent") not in RATE_IN or (r.get("rate_on") or "auto") not in dict(RATE_ON):
             raise ApiError(f"Ledger line {n}: invalid rate basis")
+        pos = "before_gst" if r.get("gst_position") == "before_gst" else "after_gst"
         out.append({"line_no": n, "ledger_id": int(r["ledger_id"]), "rate": D(r.get("rate")),
-                    "rate_in": r.get("rate_in") or "percent", "rate_on": r.get("rate_on") or "auto"})
+                    "rate_in": r.get("rate_in") or "percent", "rate_on": r.get("rate_on") or "auto",
+                    "gst_position": pos})
     return out
 
 def _validate_links(conn, doc, c, h, items, hid):
@@ -292,7 +527,8 @@ def _validate_links(conn, doc, c, h, items, hid):
         totals = {}
         for i in items:
             if i[col]:
-                totals[i[col]] = totals.get(i[col], 0) + i["qty"]
+                factor = D(i.get("factor") or 1)
+                totals[i[col]] = totals.get(i[col], 0) + (D(i["qty"]) * factor)
         for sid, q in totals.items():
             if q > _pending_one(conn, col, sid, excl):
                 raise ApiError("A line exceeds the pending quantity on its source. Reduce the quantity.")
@@ -545,19 +781,25 @@ def gst_suggest(conn, party_id, branch_id, items):
     inter = bool(ps and bs and ps != bs)
     tot = Decimal(0)
     for it in items:
-        rate = D(db.scalar(conn, "SELECT gst_rate FROM m_product WHERE id=:i", i=it.get("product_id")))
+        pid = it.get("product_id")
         gross = D(it.get("qty")) * D(it.get("rate"))
         pct = D(it.get("disc_pct"))
         disc = gross * pct / 100 if pct > 0 else D(it.get("disc_amt"))
-        tot += (gross - disc) * rate / 100
+        taxable = gross - disc
+        eff_rate = taxable / D(it.get("qty")) if D(it.get("qty")) > 0 else D(it.get("rate") or 0)
+        rate = D(it.get("gst_rate") or (resolve_product_gst_rate(conn, pid, eff_rate) if pid else 0) or 0)
+        tot += q2(taxable * rate / Decimal(100))
     wanted = ["IGST"] if inter else ["CGST", "SGST"]
     out = []
     for t in wanted:
-        led = db.one(conn, "SELECT id,name FROM m_ledger WHERE tax_type=:t AND active=1 ORDER BY id LIMIT 1", t=t)
+        led = db.one(conn, "SELECT id,name,tax_type FROM m_ledger WHERE tax_type=:t AND active=1 ORDER BY id LIMIT 1", t=t)
+        if not led:
+            led = db.one(conn, "SELECT id,name,tax_type FROM m_ledger WHERE name LIKE :t AND active=1 ORDER BY id LIMIT 1", t=f"%{t}%")
         if not led:
             raise ApiError(f"Create a ledger with tax type {t} first (Masters > Ledgers)")
-        amt = q2(tot if inter else tot / 2)
-        out.append({"ledger_id": led["id"], "ledger_id__label": led["name"], "rate": float(amt),
+        amt = q2(tot if inter else tot / Decimal(2))
+        out.append({"ledger_id": led["id"], "ledger_id__label": led["name"], "tax_type": led.get("tax_type") or t,
+                    "rate": float(amt), "amount": float(amt),
                     "rate_in": "value", "rate_on": "auto", "ledger_type": "General"})
     return {"lines": out, "inter_state": inter}
 
@@ -672,6 +914,65 @@ def action_(doc, hid, action):
         check_voucher_permission(conn, hid, "approve")
         set_status(conn, doc, hid, action, g.user)
         return jsonify(get_voucher(conn, hid))
+
+
+@require(lambda kw: kw["doc"], "create")
+def source_ledgers(doc):
+    """Fetch and aggregate ledgers and additional charges from source vouchers (e.g. Purchase Order -> GRN)."""
+    d = request.get_json(force=True) or {}
+    hids = d.get("header_ids") or []
+    if not hids:
+        raw_ids = request.args.get("header_ids") or ""
+        hids = [int(x.strip()) for x in raw_ids.split(",") if x.strip().isdigit()]
+    if not hids:
+        return jsonify([])
+
+    with db.tx() as conn:
+        # Load all ledgers from the given source vouchers
+        placeholders = ", ".join([f":h{i}" for i in range(len(hids))])
+        params = {f"h{i}": hid for i, hid in enumerate(hids)}
+        rows = db.all_(conn, f"""
+            SELECT l.ledger_id, l.rate, l.rate_in, l.rate_on, l.gst_position, l.amount,
+                   m.name AS `ledger_id__label`, m.ledger_type, m.tax_type
+            FROM txn_ledger l
+            JOIN m_ledger m ON m.id=l.ledger_id
+            WHERE l.header_id IN ({placeholders})
+            ORDER BY l.header_id, l.line_no
+        """, **params)
+
+        # Separate GST lines and Non-GST additional charge lines
+        # GST will be recalculated dynamically by GRN items tax rates, but additional charges must transfer
+        out = []
+        seen = {}
+        for r in rows:
+            tt = (r.get("tax_type") or "").upper()
+            nm = (r.get("name") or "").upper()
+            is_gst = tt in ("CGST", "SGST", "IGST") or any(nm.startswith(x) for x in ("CGST", "SGST", "IGST"))
+            if is_gst:
+                continue
+
+            lid = r["ledger_id"]
+            if lid not in seen:
+                entry = {
+                    "ledger_id": lid,
+                    "ledger_id__label": r["ledger_id__label"],
+                    "rate": float(r["rate"] or 0),
+                    "rate_in": r.get("rate_in") or "value",
+                    "rate_on": r.get("rate_on") or "auto",
+                    "gst_position": r.get("gst_position") or "after_gst",
+                    "amount": float(r["amount"] or 0),
+                    "ledger_type": r.get("ledger_type") or "General",
+                    "tax_type": r.get("tax_type")
+                }
+                seen[lid] = entry
+                out.append(entry)
+            else:
+                # Same ledger exists in multiple POs: combine amounts if value based
+                existing = seen[lid]
+                if existing.get("rate_in") == "value" and r.get("rate_in") == "value":
+                    existing["rate"] = round(existing["rate"] + float(r["rate"] or 0), 2)
+                    existing["amount"] = round(existing["amount"] + float(r["amount"] or 0), 2)
+        return jsonify(out)
 
 
 @require(lambda kw: kw["doc"], "create")

@@ -1,13 +1,14 @@
 """Thin SQLAlchemy Core helpers: pooled engine, dict rows, tiny query API."""
 from contextlib import contextmanager
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 
 _engine = None
 
 
 def init_engine(url):
     global _engine
-    _engine = create_engine(url, pool_size=8, max_overflow=4, pool_recycle=1800, pool_pre_ping=True, future=True)
+    _engine = create_engine(url, poolclass=NullPool, future=True)
     return _engine
 
 

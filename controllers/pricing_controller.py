@@ -28,9 +28,50 @@ def resolve(conn, party_id, product_id, on_date):
     }
     if not product_id:
         return out
-    prod = db.one(conn, "SELECT group_id FROM m_product WHERE id=:i", i=product_id)
+    prod = db.one(conn, "SELECT p.group_id, p.gst_type, p.gst_rate, p.uom_id, u.name uom_name, u.decimals, u.allow_fraction "
+                        "FROM m_product p JOIN m_uom u ON u.id=p.uom_id WHERE p.id=:i", i=product_id)
     if not prod:
         return out
+    gst_type = prod.get("gst_type") or "Flat"
+    out["gst_type"] = gst_type
+    out["gst_rate"] = float(prod.get("gst_rate") or 0)
+    slabs = []
+    if gst_type == "Slab":
+        slab_rows = db.all_(conn, "SELECT min_price, max_price, gst_rate FROM m_product_gst_slab WHERE product_id=:p ORDER BY min_price ASC", p=product_id)
+        for s in slab_rows:
+            slabs.append({
+                "min_price": float(s["min_price"]),
+                "max_price": float(s["max_price"]) if s["max_price"] is not None else None,
+                "gst_rate": float(s["gst_rate"]),
+            })
+    out["gst_slabs"] = slabs
+    out["main_uom_id"] = prod["uom_id"]
+    out["main_uom_name"] = prod["uom_name"]
+
+    # Fetch Main UOM and all Alternate UOMs for this product
+    uoms = [{
+        "uom_id": prod["uom_id"],
+        "name": prod["uom_name"],
+        "conversion_factor": 1.0,
+        "is_main": True,
+        "allow_fraction": bool(prod.get("allow_fraction") or (prod.get("decimals") or 0) > 0)
+    }]
+    alts = db.all_(conn, """
+        SELECT u.id AS uom_id, u.name, u.decimals, u.allow_fraction, pu.conversion_factor
+        FROM m_product_uom pu
+        JOIN m_uom u ON u.id=pu.uom_id
+        WHERE pu.product_id=:p AND u.active=1
+        ORDER BY u.name
+    """, p=product_id)
+    for a in alts:
+        uoms.append({
+            "uom_id": a["uom_id"],
+            "name": a["name"],
+            "conversion_factor": float(a["conversion_factor"]),
+            "is_main": False,
+            "allow_fraction": bool(a.get("allow_fraction") or (a.get("decimals") or 0) > 0)
+        })
+    out["uoms"] = uoms
 
     # Check active price lists that contain this item
     available_pls = db.all_(conn, """

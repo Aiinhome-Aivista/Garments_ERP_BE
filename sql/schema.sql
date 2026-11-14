@@ -175,6 +175,7 @@ CREATE TABLE IF NOT EXISTS m_product (
   attr_values JSON NULL,
   default_sales_ledger_id INT NULL,
   default_purchase_ledger_id INT NULL,
+  gst_type VARCHAR(10) NOT NULL DEFAULT 'Flat',
   gst_rate DECIMAL(5,2) NOT NULL DEFAULT 0,
   hsn_code VARCHAR(12),
   package_qty DECIMAL(12,3) NULL,
@@ -187,6 +188,16 @@ CREATE TABLE IF NOT EXISTS m_product (
   FOREIGN KEY (uom_id) REFERENCES m_uom(id),
   FOREIGN KEY (default_sales_ledger_id) REFERENCES m_ledger(id),
   FOREIGN KEY (default_purchase_ledger_id) REFERENCES m_ledger(id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS m_product_gst_slab (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  product_id INT NOT NULL,
+  min_price DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+  max_price DECIMAL(12,2) NULL,
+  gst_rate DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+  KEY ix_product_gst_slab_product (product_id),
+  FOREIGN KEY (product_id) REFERENCES m_product(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS m_product_customer (
@@ -212,6 +223,46 @@ CREATE TABLE IF NOT EXISTS m_product_process (
   FOREIGN KEY (product_id) REFERENCES m_product(id) ON DELETE CASCADE,
   FOREIGN KEY (process_id) REFERENCES m_process(id),
   FOREIGN KEY (material_id) REFERENCES m_product(id)
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------------- bill of materials (BOM) master
+CREATE TABLE IF NOT EXISTS m_bom (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  bom_no VARCHAR(60) NOT NULL UNIQUE,
+  bom_name VARCHAR(120) NULL,
+  product_id INT NOT NULL,                          -- Finished Good
+  batch_qty DECIMAL(14,4) NOT NULL DEFAULT 1.0000,  -- Manufacturing Quantity
+  uom_id INT NOT NULL,
+  remarks VARCHAR(500) NULL,
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY ix_bom_product (product_id),
+  KEY ix_bom_uom (uom_id),
+  FOREIGN KEY (product_id) REFERENCES m_product(id),
+  FOREIGN KEY (uom_id) REFERENCES m_uom(id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS m_bom_item (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  bom_id INT NOT NULL,
+  seq INT NOT NULL DEFAULT 0,
+  material_id INT NOT NULL,                         -- Raw Material / Component
+  godown_id INT NULL,
+  item_type VARCHAR(60) NULL,
+  qty_per_unit DECIMAL(14,4) NOT NULL DEFAULT 0.0000,
+  uom_id INT NOT NULL,
+  rate DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+  wastage_pct DECIMAL(6,2) NOT NULL DEFAULT 0.00,   -- Rate (%)
+  remarks VARCHAR(255) NULL,
+  KEY ix_bom_item_bom (bom_id),
+  KEY ix_bom_item_material (material_id),
+  KEY ix_bom_item_godown (godown_id),
+  KEY ix_bom_item_uom (uom_id),
+  FOREIGN KEY (bom_id) REFERENCES m_bom(id) ON DELETE CASCADE,
+  FOREIGN KEY (material_id) REFERENCES m_product(id),
+  FOREIGN KEY (godown_id) REFERENCES m_godown(id) ON DELETE SET NULL,
+  FOREIGN KEY (uom_id) REFERENCES m_uom(id)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS m_pricelist_item (
@@ -363,6 +414,7 @@ CREATE TABLE IF NOT EXISTS txn_item (
   disc_pct DECIMAL(6,2) NOT NULL DEFAULT 0,
   disc_amt DECIMAL(14,2) NOT NULL DEFAULT 0,
   net_amount DECIMAL(16,2) NOT NULL DEFAULT 0,
+  gst_rate DECIMAL(6,2) NOT NULL DEFAULT 0,
   delivery_date DATE NULL,
   salesman_id INT NULL,
   broker_id INT NULL,
@@ -388,6 +440,7 @@ CREATE TABLE IF NOT EXISTS txn_ledger (
   rate DECIMAL(14,4) NOT NULL DEFAULT 0,
   rate_in VARCHAR(8) NOT NULL DEFAULT 'percent',    -- percent | value
   rate_on VARCHAR(24) NOT NULL DEFAULT 'auto',      -- auto | total_qty | total_product_value | current_subtotal | net_value
+  gst_position VARCHAR(16) NOT NULL DEFAULT 'after_gst', -- before_gst | after_gst
   amount DECIMAL(16,2) NOT NULL DEFAULT 0,
   FOREIGN KEY (header_id) REFERENCES txn_header(id) ON DELETE CASCADE,
   FOREIGN KEY (ledger_id) REFERENCES m_ledger(id)

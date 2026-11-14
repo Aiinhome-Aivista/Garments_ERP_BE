@@ -24,6 +24,7 @@ ITEM_COLS = {
     "disc_pct": dict(label="Disc %", type="decimal", width=80),
     "disc_amt": dict(label="Disc Amt", type="decimal", width=100),
     "net_amount": dict(label="Net Amount", type="decimal", readonly=True, width=120),
+    "gst_rate": dict(label="GST %", type="decimal", width=90),
     "delivery_date": dict(label="Delivery by", type="date", width=130),
     "ref_no": dict(label="Order Number", type="text", readonly=True, width=130),
     "indent_no": dict(label="Indent / Requisition No", type="text", readonly=True, width=140),
@@ -34,9 +35,9 @@ ITEM_COLS = {
 }
 
 _SALES_LINE = ["barcode", "godown_id", "bin_no", "product_id", "description", "customer_item_name", "qty",
-               "pricelist_id", "rate", "disc_pct", "disc_amt", "net_amount", "ref_no", "salesman_id", "broker_id", "retailer_name"]
+               "pricelist_id", "rate", "disc_pct", "disc_amt", "net_amount", "gst_rate", "ref_no", "salesman_id", "broker_id", "retailer_name"]
 _ORDER_LINE = ["product_id", "description", "customer_item_name", "qty", "pricelist_id", "rate", "disc_pct",
-               "disc_amt", "net_amount", "delivery_date"]
+               "disc_amt", "net_amount", "gst_rate", "delivery_date"]
 
 REMARKS = dict(name="remarks", label="Remarks", type="text", span=2)
 
@@ -77,7 +78,7 @@ VOUCHERS = {
         label="GRN", plural="Goods Received Notes", kind="GRN", module="Procurement", icon="box",
         party_label="Party Name", party_types=LEDGER_PARTY_SUPPLIER, header=[REMARKS],
         cols=["ref_no", "barcode", "godown_id", "bin_no", "product_id", "description", "customer_item_name", "qty",
-              "pricelist_id", "rate", "disc_pct", "disc_amt", "net_amount", "indent_no"],
+              "pricelist_id", "rate", "disc_pct", "disc_amt", "net_amount", "gst_rate", "indent_no"],
         source=dict(kind="purchase_order", multi=True, required=False, label="Purchase Orders", no_label="Purchase Order No"),
         stock=1, scan=False, auto_barcode=True),
     "purchase": dict(
@@ -86,7 +87,7 @@ VOUCHERS = {
         header=[dict(name="ref_doc_no", label="Party Doc No", type="text"),
                 dict(name="ref_doc_date", label="Party Doc Date", type="date"), REMARKS],
         cols=["barcode", "godown_id", "bin_no", "product_id", "description", "customer_item_name", "qty",
-              "pricelist_id", "rate", "disc_pct", "disc_amt", "net_amount", "src_no", "ref_no"],
+              "pricelist_id", "rate", "disc_pct", "disc_amt", "net_amount", "gst_rate", "src_no", "ref_no"],
         source=dict(kind="grn", multi=True, required=True, label="GRNs", no_label="GRN No"),
         stock=0, scan=False),
     "purchase_return": dict(
@@ -94,7 +95,7 @@ VOUCHERS = {
         party_label="Party Name", party_types=LEDGER_PARTY_SUPPLIER,
         header=[dict(name="ref_voucher_id", label="Purchase Invoice No", type="voucher", doc="purchase", required=True), REMARKS],
         cols=["barcode", "godown_id", "bin_no", "product_id", "description", "customer_item_name", "qty",
-              "pricelist_id", "rate", "disc_pct", "disc_amt", "net_amount"],
+              "pricelist_id", "rate", "disc_pct", "disc_amt", "net_amount", "gst_rate"],
         source=None, stock=-1, scan=True, return_of="purchase"),
 }
 
