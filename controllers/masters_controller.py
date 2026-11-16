@@ -391,6 +391,10 @@ def _product_after(conn, rid, created):
         db.run(conn, "UPDATE m_product SET barcode=:b WHERE id=:i", b=_ean13(f"200{rid:09d}"), i=rid)
 
 def _ledger_before(conn, data, payload, rid):
+    gst_reg = data.get("gst_registration_type")
+    from app.registry import GST_REGISTRATION_TYPES
+    if gst_reg and gst_reg not in GST_REGISTRATION_TYPES:
+        raise ApiError(f"GST Registration Type must be one of: {', '.join(GST_REGISTRATION_TYPES)}", field="gst_registration_type")
     if data.get("ledger_type") != "Customer":
         for k in ("broker_id", "salesman_id", "brokerage_rate", "cash_discount", "transporter_id"):
             data[k] = None

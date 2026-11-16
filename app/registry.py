@@ -10,6 +10,7 @@ Field keys : name, label, type, required, options, ref, filter, show_if, default
 LEDGER_TYPES = ["General", "Customer", "Supplier", "Broker", "Salesman", "Jobworker",
                 "Transporter", "Purchase", "Sales", "Discount"]
 TAX_TYPES = ["CGST", "SGST", "IGST", "TDS", "TCS"]
+GST_REGISTRATION_TYPES = ["Registered Dealer", "Unregistered Dealer", "Composite Dealer"]
 
 # Predefined "Type of transaction" list from the metadata document (+ 'Requisition', added because the
 # Requisition for PO needs its own number series).
@@ -165,8 +166,10 @@ MASTERS = {
             dict(name="ledger_type", label="Ledger Type", type="select", options=LEDGER_TYPES, default="General", required=True, list=True),
             dict(name="ledger_group_id", label="Ledger Parent (group)", type="ref", ref="ledger_group"),
             dict(name="ledger_account_id", label="Ledger A/c", type="ref", ref="ledger_account", list=True),
-            T("address", "Address"), T("city", "City", list=True), T("state", "State", list=True),
-            T("pincode", "Pincode"), T("gstin", "GSTIN"), T("pan_no", "PAN No"),
+            T("address", "Address"), T("country", "Country", default="India", list=True), T("city", "City", list=True), T("state", "State", list=True),
+            T("pincode", "Pincode"), T("gstin", "GSTIN"),
+            dict(name="gst_registration_type", label="GST Registration Type", type="select", options=GST_REGISTRATION_TYPES),
+            T("pan_no", "PAN No"),
             T("contact_person", "Contact Person"), T("mobile", "Mobile", list=True), T("email", "Email ID"),
             dict(name="tax_type", label="Tax Type", type="select", options=[""] + TAX_TYPES),
             dict(name="broker_id", label="Broker Name", type="ref", ref="ledger", filter={"ledger_type": "Broker"}, show_if=CUSTOMER_ONLY),
