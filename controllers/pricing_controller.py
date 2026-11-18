@@ -44,6 +44,8 @@ def resolve(conn, party_id, product_id, on_date):
                 "max_price": float(s["max_price"]) if s["max_price"] is not None else None,
                 "gst_rate": float(s["gst_rate"]),
             })
+        if slabs and out["gst_rate"] == 0:
+            out["gst_rate"] = slabs[0]["gst_rate"]
     out["gst_slabs"] = slabs
     out["main_uom_id"] = prod["uom_id"]
     out["main_uom_name"] = prod["uom_name"]
@@ -121,6 +123,15 @@ def resolve(conn, party_id, product_id, on_date):
             if out["disc_pct"] == 0:
                 out["disc_pct"] = float(item["disc_pct"])
                 out["disc_amt"] = float(item["disc_amt"])
+
+    if gst_type == "Slab" and slabs:
+        eff_rate = out.get("rate") or 0
+        for s in slabs:
+            min_p = s["min_price"]
+            max_p = s["max_price"]
+            if min_p <= eff_rate and (max_p is None or eff_rate <= max_p):
+                out["gst_rate"] = s["gst_rate"]
+                break
 
     return out
 

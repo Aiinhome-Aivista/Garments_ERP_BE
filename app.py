@@ -147,6 +147,18 @@ def masters_next_no(key):
 def masters_lookup(key):
     return masters_controller.lookup(key=key)
 
+@app.route('/api/bom/materials', methods=['GET'])
+def bom_materials():
+    return masters_controller.get_eligible_materials()
+
+@app.route('/api/bom/godowns', methods=['GET'])
+def bom_godowns():
+    return masters_controller.get_godowns()
+
+@app.route('/api/bom/uoms', methods=['GET'])
+def bom_uoms():
+    return masters_controller.get_uoms()
+
 @app.route('/api/masters/<key>/<int:rid>', methods=['GET'])
 def masters_get_(key, rid):
     return masters_controller.get_(key=key, rid=rid)

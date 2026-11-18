@@ -35,7 +35,7 @@ MASTERS = {
         table="m_generic", label="Generic Masters", group="Basics", icon="button", quick_add=True,
         help="Sizes, colours, parts, patterns, sleeves, collections. Pick a type, or type a new one to add it.",
         fields=[
-            T("name", "Name", required=True, list=True),
+            T("name", "Name", list=True),
             dict(name="type_id", label="Type", type="ref", ref="generic_type", required=True, list=True, quick_add=True),
         ]),
     "uom": dict(
@@ -134,6 +134,8 @@ MASTERS = {
             dict(key="processes", table="m_product_process", fk="product_id", label="Process Definition with BOM",
                  order="seq", seq_col="seq",
                  fields=[dict(name="process_id", label="Process", type="ref", ref="process", required=True),
+                         dict(name="components_of_id", label="Components of", type="ref", ref="product"),
+                         dict(name="uom_id", label="Unit of Manufacture", type="ref", ref="uom"),
                          dict(name="material_id", label="Material to Issue", type="ref", ref="product"),
                          T("part_name", "Part Name"),
                          dict(name="qty", label="Qty / Unit", type="decimal", default=0),

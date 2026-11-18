@@ -71,6 +71,8 @@ def resolve_product_gst_rate(conn, product_id, taxable_price):
     # Slab Rate
     price = D(taxable_price)
     slabs = db.all_(conn, "SELECT min_price, max_price, gst_rate FROM m_product_gst_slab WHERE product_id=:p ORDER BY min_price ASC", p=product_id)
+    if price <= 0 and slabs:
+        return D(slabs[0].get("gst_rate") or 0)
     for s in slabs:
         min_p = D(s.get("min_price") or 0)
         max_p = D(s["max_price"]) if s.get("max_price") is not None else None
@@ -80,7 +82,9 @@ def resolve_product_gst_rate(conn, product_id, taxable_price):
         else:
             if price >= min_p:
                 return D(s.get("gst_rate") or 0)
-    # If no slab matched, return default gst_rate if set, else 0
+    # If no slab matched, return first slab rate if available, else default gst_rate
+    if slabs:
+        return D(slabs[0].get("gst_rate") or 0)
     return D(p.get("gst_rate") or 0)
 
 def compute(conn, items, ledgers):
@@ -126,12 +130,12 @@ def compute(conn, items, ledgers):
         rate = D(l.get("rate"))
         on = l.get("rate_on") or "auto"
         inn = l.get("rate_in") or "value"
-        if on == "auto" or not l.get("rate_on"):
-            a = rate
-        elif inn == "value":
-            a = rate * tq if on == "total_qty" else rate
-        else:
+        if inn == "percent":
             a = base_val * rate / Decimal(100)
+        elif on == "total_qty":
+            a = rate * tq
+        else:
+            a = rate
         a = q2(a)
         return -abs(a) if types.get(lid) == "Discount" else a
 
@@ -339,7 +343,7 @@ SELECT * FROM (
         h.salesman_id AS h_salesman_id, h.broker_id AS h_broker_id, h.retailer_name AS h_retailer_name,
         sm.name AS h_salesman_label, bk.name AS h_broker_label,
         i.id AS src_item_id, i.barcode, i.godown_id, gd.name AS godown_label, i.bin_no, i.product_id,
-        p.item_name, COALESCE(i.gst_rate, p.gst_rate, 0) AS gst_rate,
+        p.item_name, CASE WHEN i.gst_rate IS NOT NULL AND i.gst_rate > 0 THEN i.gst_rate ELSE COALESCE(p.gst_rate, 0) END AS gst_rate,
         COALESCE(tu.name, u.name) AS uom, i.uom_id, i.factor, i.primary_qty,
         i.description, i.customer_item_name, i.pricelist_id,
         pl.name AS pricelist_label, i.rate, i.disc_pct, i.disc_amt, i.delivery_date, i.ref_no, i.indent_no,
@@ -385,6 +389,9 @@ def pending_lines(conn, doc, party_id=None, exclude=0):
     uoms_map = _fetch_product_uoms_map(conn, [it["product_id"] for it in rows if it.get("product_id")])
     for it in rows:
         it["available_uoms"] = uoms_map.get(it["product_id"], [])
+        if (it.get("gst_rate") is None or float(it.get("gst_rate") or 0) == 0) and it.get("product_id"):
+            eff_rate = float(it.get("rate") or 0)
+            it["gst_rate"] = float(resolve_product_gst_rate(conn, it["product_id"], eff_rate))
     return rows
 
 def _pending_one(conn, col, item_id, exclude):

@@ -211,6 +211,63 @@ def load_one(conn, key, rid):
             alt = [{"uom_id": row["alt_uom_id"], "conversion_factor": row["conversion_factor"], "uom_id__label": label}]
         row["alternate_uoms"] = alt
         row["units"] = alt
+
+        # Load nested materials for each process
+        if "processes" in row:
+            for pr in row["processes"]:
+                if not pr.get("components_of_id"):
+                    pr["components_of_id"] = rid
+                    pr["components_of_id__label"] = row.get("item_name") or row.get("name")
+                elif not pr.get("components_of_id__label"):
+                    pr["components_of_id__label"] = db.scalar(conn, "SELECT item_name FROM m_product WHERE id=:i", i=pr["components_of_id"]) or row.get("item_name")
+                pp_id = pr.get("id")
+                mats = []
+                if pp_id:
+                    mats = db.all_(conn, """
+                        SELECT ppm.id, ppm.product_process_id, ppm.material_id, p.item_name AS `material_id__label`,
+                               ppm.godown_id, g.name AS `godown_id__label`,
+                               COALESCE(ppm.item_type, '') AS item_type,
+                               ppm.qty_per_unit, ppm.uom_id, u.name AS `uom_id__label`,
+                               ppm.rate, ppm.rate_pct, ppm.seq
+                        FROM m_product_process_material ppm
+                        JOIN m_product p ON p.id = ppm.material_id
+                        LEFT JOIN m_godown g ON g.id = ppm.godown_id
+                        LEFT JOIN m_product_category c ON c.id = p.category_id
+                        JOIN m_uom u ON u.id = ppm.uom_id
+                        WHERE ppm.product_process_id = :pp
+                        ORDER BY ppm.seq, ppm.id
+                    """, pp=pp_id)
+                    # Legacy fallback if no rows in m_product_process_material but material_id exists on m_product_process
+                    if not mats and pr.get("material_id") and float(pr.get("qty") or 0) > 0:
+                        mid = pr["material_id"]
+                        mat_info = db.one(conn, """
+                            SELECT p.item_name, COALESCE(c.name, 'Raw Material') AS cat_name, p.uom_id, u.name AS uom_name
+                            FROM m_product p
+                            LEFT JOIN m_product_category c ON c.id = p.category_id
+                            JOIN m_uom u ON u.id = p.uom_id
+                            WHERE p.id = :i
+                        """, i=mid)
+                        if mat_info:
+                            mats = [{
+                                "material_id": mid,
+                                "material_id__label": mat_info["item_name"],
+                                "item_type": mat_info["cat_name"],
+                                "qty_per_unit": float(pr["qty"]),
+                                "uom_id": mat_info["uom_id"],
+                                "uom_id__label": mat_info["uom_name"],
+                                "seq": 1
+                            }]
+                for m_row in mats:
+                    mid = m_row["material_id"]
+                    uoms = db.all_(conn, """
+                        SELECT u.id AS uom_id, u.name, 1.0 AS conversion_factor, 1 AS is_main
+                        FROM m_product p JOIN m_uom u ON u.id=p.uom_id WHERE p.id=:p
+                        UNION ALL
+                        SELECT u.id AS uom_id, u.name, pu.conversion_factor, 0 AS is_main
+                        FROM m_product_uom pu JOIN m_uom u ON u.id=pu.uom_id WHERE pu.product_id=:p AND u.active=1
+                    """, p=mid)
+                    m_row["available_uoms"] = uoms
+                pr["materials"] = mats
     return row
 
 
@@ -386,6 +443,35 @@ def _product_before(conn, data, payload, rid):
             if cur_max >= next_min:
                 raise ApiError(f"Overlapping price ranges between Slab row {idx1} (up to {cur_max}) and Slab row {idx2} (starts at {next_min})")
 
+    # Process Definition with BOM Validation
+    if "processes" in payload:
+        processes = payload.get("processes") or []
+        for p_idx, proc in enumerate(processes, 1):
+            pid = proc.get("process_id")
+            if not pid:
+                raise ApiError(f"Process {p_idx}: Process selection is required", field="processes")
+            
+            seen_mats = set()
+            mats = proc.get("materials") or []
+            for m_idx, mat in enumerate(mats, 1):
+                mid = mat.get("material_id")
+                if not mid:
+                    raise ApiError(f"Process {p_idx}, Material {m_idx}: Item selection is required")
+                if mid in seen_mats:
+                    mat_name = mat.get("material_id__label") or f"Item #{mid}"
+                    raise ApiError(f"Process {p_idx}: Duplicate item '{mat_name}' cannot be added multiple times within the same process")
+                seen_mats.add(mid)
+                
+                try:
+                    q = Decimal(str(mat.get("qty_per_unit") or 0))
+                    if q <= 0:
+                        raise ApiError(f"Process {p_idx}, Material {m_idx}: Quantity must be greater than zero")
+                except Exception:
+                    raise ApiError(f"Process {p_idx}, Material {m_idx}: Quantity must be a valid number")
+                
+                if not mat.get("uom_id"):
+                    raise ApiError(f"Process {p_idx}, Material {m_idx}: UOM is required")
+
 def _product_after(conn, rid, created):
     if created:
         db.run(conn, "UPDATE m_product SET barcode=:b WHERE id=:i", b=_ean13(f"200{rid:09d}"), i=rid)
@@ -555,7 +641,50 @@ def save(conn, key, payload, rid=None):
                 cd[ch["seq_col"]] = seq
             if ch.get("max_rows") and seq > ch["max_rows"]:
                 raise ApiError(f"{ch['label']} allows at most {ch['max_rows']} rows")
-            db.insert(conn, ch["table"], cd)
+            
+            # For processes, handle components_of_id and maintain legacy material_id & qty
+            if child_key == "processes":
+                comp_id = row.get("components_of_id")
+                if comp_id:
+                    cd["components_of_id"] = int(comp_id)
+                elif not cd.get("components_of_id"):
+                    cd["components_of_id"] = rid
+
+                if row.get("materials"):
+                    first_mat = row["materials"][0]
+                    if first_mat.get("material_id"):
+                        cd["material_id"] = int(first_mat["material_id"])
+                        cd["qty"] = Decimal(str(first_mat.get("qty_per_unit") or 0))
+
+            pp_id = db.insert(conn, ch["table"], cd)
+
+            # Insert nested materials into relational table m_product_process_material
+            if child_key == "processes" and "materials" in row:
+                m_seq = 0
+                for mat in row.get("materials") or []:
+                    mid = mat.get("material_id")
+                    if not mid:
+                        continue
+                    m_seq += 1
+                    uid = mat.get("uom_id")
+                    if not uid:
+                        uid = db.scalar(conn, "SELECT uom_id FROM m_product WHERE id=:i", i=mid)
+                    cat_name = mat.get("item_type") if mat.get("item_type") is not None else ""
+                    gid = mat.get("godown_id")
+                    rate_val = Decimal(str(mat.get("rate") or 0))
+                    rate_pct_val = Decimal(str(mat.get("rate_pct") or 0))
+
+                    db.insert(conn, "m_product_process_material", {
+                        "product_process_id": pp_id,
+                        "material_id": int(mid),
+                        "godown_id": int(gid) if gid else None,
+                        "item_type": cat_name,
+                        "qty_per_unit": Decimal(str(mat.get("qty_per_unit") or 0)),
+                        "uom_id": int(uid),
+                        "rate": rate_val,
+                        "rate_pct": rate_pct_val,
+                        "seq": m_seq
+                    })
     if after:
         after(conn, rid, created)
     return rid
@@ -598,3 +727,68 @@ def delete_(key, rid):
     except IntegrityError as e:
         raise _friendly(e)
     return jsonify({"ok": True})
+
+
+@login_required
+def get_eligible_materials():
+    """Return all active items eligible for BOM with category name, main UOM, and alternate UOMs."""
+    with db.tx() as conn:
+        rows = db.all_(conn, """
+            SELECT p.id, p.name, p.item_name, p.category_id,
+                   COALESCE(c.name, 'Raw Material') AS category_name,
+                   p.uom_id, u.name AS uom_name
+            FROM m_product p
+            LEFT JOIN m_product_category c ON c.id = p.category_id
+            JOIN m_uom u ON u.id = p.uom_id
+            WHERE p.active = 1
+            ORDER BY p.item_name
+        """)
+        p_ids = [r["id"] for r in rows]
+        uoms_map = {}
+        if p_ids:
+            alt_rows = db.all_(conn, f"""
+                SELECT pu.product_id, pu.uom_id, u.name, pu.conversion_factor
+                FROM m_product_uom pu
+                JOIN m_uom u ON u.id = pu.uom_id
+                WHERE pu.product_id IN ({','.join(map(str, p_ids))}) AND u.active = 1
+                ORDER BY u.name
+            """)
+            for ar in alt_rows:
+                uoms_map.setdefault(ar["product_id"], []).append({
+                    "uom_id": ar["uom_id"],
+                    "name": ar["name"],
+                    "conversion_factor": float(ar["conversion_factor"]),
+                    "is_main": False
+                })
+
+        for r in rows:
+            alts = uoms_map.get(r["id"], [])
+            main_uom = {
+                "uom_id": r["uom_id"],
+                "name": r["uom_name"],
+                "conversion_factor": 1.0,
+                "is_main": True
+            }
+            r["available_uoms"] = [main_uom] + alts
+            r["label"] = r["item_name"]
+            r["item_type"] = r["category_name"]
+        return jsonify(rows)
+
+
+@login_required
+def get_godowns():
+    """Return all active godowns for BOM material storage selection."""
+    with db.tx() as conn:
+        rows = db.all_(conn, "SELECT id, name FROM m_godown WHERE active = 1 ORDER BY (name LIKE '%Main%') DESC, name ASC")
+        return jsonify(rows)
+
+
+@login_required
+def get_uoms():
+    """Return all active UOMs for process/BOM selection."""
+    with db.tx() as conn:
+        rows = db.all_(conn, "SELECT id, name FROM m_uom WHERE active = 1 ORDER BY name ASC")
+        return jsonify(rows)
+
+
+
