@@ -52,18 +52,43 @@ def analyze(conn, order_ids):
     raw, detail, used_free = {}, [], {}
 
     def explode(pid, qty, depth, root):
-        rows = db.all_(conn, "SELECT pp.*, pr.name process_name FROM m_product_process pp JOIN m_process pr ON pr.id=pp.process_id "
-                             "WHERE pp.product_id=:p ORDER BY pp.seq", p=pid)
+        # Fetch processes and materials from relational table m_product_process_material
+        rows = db.all_(conn, """
+            SELECT pp.id AS pp_id, pp.seq, pp.process_id, pp.out_status, pr.name AS process_name,
+                   ppm.material_id, ppm.item_type, ppm.qty_per_unit, ppm.uom_id
+            FROM m_product_process pp
+            JOIN m_process pr ON pr.id = pp.process_id
+            JOIN m_product_process_material ppm ON ppm.product_process_id = pp.id
+            WHERE pp.product_id = :p
+            ORDER BY pp.seq, ppm.seq, ppm.id
+        """, p=pid)
+
+        # Legacy fallback if no rows in m_product_process_material:
+        if not rows:
+            rows = db.all_(conn, """
+                SELECT pp.id AS pp_id, pp.seq, pp.process_id, pp.out_status, pr.name AS process_name,
+                       pp.material_id, 'Raw Material' AS item_type, pp.qty AS qty_per_unit, p.uom_id
+                FROM m_product_process pp
+                JOIN m_process pr ON pr.id = pp.process_id
+                JOIN m_product p ON p.id = pp.material_id
+                WHERE pp.product_id = :p AND pp.material_id IS NOT NULL AND pp.qty > 0
+                ORDER BY pp.seq
+            """, p=pid)
+
         for r in rows:
-            if not r["material_id"]:
+            if not r.get("material_id"):
                 continue
-            need_q = qty * D(r["qty"])
+            need_q = qty * D(r["qty_per_unit"])
             if need_q <= 0:
                 continue
             mid = r["material_id"]
-            detail.append({"fg": names(root), "process": r["process_name"], "part_name": r["part_name"], "material": names(mid),
-                           "per_unit": _f(r["qty"]), "required": _f(need_q), "out_status": r["out_status"]})
-            has_bom = db.scalar(conn, "SELECT COUNT(*) FROM m_product_process WHERE product_id=:p AND material_id IS NOT NULL", p=mid)
+            detail.append({"fg": names(root), "process": r["process_name"], "part_name": r.get("item_type") or "", "material": names(mid),
+                           "per_unit": _f(r["qty_per_unit"]), "required": _f(need_q), "out_status": r.get("out_status") or "WIP"})
+            has_bom = db.scalar(conn, """
+                SELECT COUNT(*) FROM m_product_process pp
+                LEFT JOIN m_product_process_material ppm ON ppm.product_process_id = pp.id
+                WHERE pp.product_id = :p AND (ppm.material_id IS NOT NULL OR pp.material_id IS NOT NULL)
+            """, p=mid)
             if has_bom and depth < MAX_DEPTH:              # semi-finished input: use its free stock, explode the rest
                 left = max(D(free_stock(conn, mid)) - used_free.get(mid, D(0)), D(0))
                 take = min(need_q, left)

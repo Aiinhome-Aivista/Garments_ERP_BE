@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS m_generic_type (
 CREATE TABLE IF NOT EXISTS m_generic (
   id INT AUTO_INCREMENT PRIMARY KEY,
   type_id INT NOT NULL,
-  name VARCHAR(120) NOT NULL,
+  name VARCHAR(120) NULL,
   active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uq_generic (type_id, name),
@@ -216,7 +216,9 @@ CREATE TABLE IF NOT EXISTS m_product_process (
   product_id INT NOT NULL,
   seq INT NOT NULL DEFAULT 0,
   process_id INT NOT NULL,
-  material_id INT NULL,                             -- material to issue (a product)
+  components_of_id INT NULL,                        -- finished item/sub-assembly this process belongs to
+  uom_id INT NULL,                                  -- unit of manufacture
+  material_id INT NULL,                             -- material to issue (a product, legacy fallback)
   part_name VARCHAR(100),
   qty DECIMAL(14,4) NOT NULL DEFAULT 0,             -- per unit of finished product
   process_rate DECIMAL(12,2) NOT NULL DEFAULT 0,
@@ -224,7 +226,28 @@ CREATE TABLE IF NOT EXISTS m_product_process (
   overhead_pct DECIMAL(6,2) NOT NULL DEFAULT 0,
   FOREIGN KEY (product_id) REFERENCES m_product(id) ON DELETE CASCADE,
   FOREIGN KEY (process_id) REFERENCES m_process(id),
+  FOREIGN KEY (components_of_id) REFERENCES m_product(id) ON DELETE CASCADE,
+  FOREIGN KEY (uom_id) REFERENCES m_uom(id) ON DELETE SET NULL,
   FOREIGN KEY (material_id) REFERENCES m_product(id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS m_product_process_material (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  product_process_id INT NOT NULL,
+  material_id INT NOT NULL,
+  godown_id INT NULL,
+  item_type VARCHAR(80) NULL,
+  qty_per_unit DECIMAL(14,4) NOT NULL DEFAULT 0,
+  uom_id INT NOT NULL,
+  rate DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+  rate_pct DECIMAL(6,2) NOT NULL DEFAULT 0.00,
+  seq INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (product_process_id) REFERENCES m_product_process(id) ON DELETE CASCADE,
+  FOREIGN KEY (material_id) REFERENCES m_product(id),
+  FOREIGN KEY (godown_id) REFERENCES m_godown(id) ON DELETE SET NULL,
+  FOREIGN KEY (uom_id) REFERENCES m_uom(id)
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------- bill of materials (BOM) master
