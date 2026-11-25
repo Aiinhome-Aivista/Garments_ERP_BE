@@ -254,6 +254,7 @@ LEFT JOIN m_ledger tr ON tr.id=h.transporter_id
 
 ITEM_SQL = """
 SELECT i.*, p.item_name AS `product_id__label`, COALESCE(i.gst_rate, p.gst_rate, 0) AS gst_rate, p.barcode AS product_barcode,
+       p.enable_batch,
        COALESCE(tu.name, u.name) AS uom, COALESCE(tu.name, u.name) AS uom_name,
        p.uom_id AS main_uom_id, u.name AS main_uom_name,
        gd.name AS `godown_id__label`, pl.name AS `pricelist_id__label`, sm.name AS `salesman_id__label`,
@@ -342,7 +343,7 @@ SELECT * FROM (
         h.party_id, pt.name AS party_name,
         h.salesman_id AS h_salesman_id, h.broker_id AS h_broker_id, h.retailer_name AS h_retailer_name,
         sm.name AS h_salesman_label, bk.name AS h_broker_label,
-        i.id AS src_item_id, i.barcode, i.godown_id, gd.name AS godown_label, i.bin_no, i.product_id,
+        i.id AS src_item_id, i.barcode, i.batch_no, p.enable_batch, i.godown_id, gd.name AS godown_label, i.bin_no, i.product_id,
         p.item_name, CASE WHEN i.gst_rate IS NOT NULL AND i.gst_rate > 0 THEN i.gst_rate ELSE COALESCE(p.gst_rate, 0) END AS gst_rate,
         COALESCE(tu.name, u.name) AS uom, i.uom_id, i.factor, i.primary_qty,
         i.description, i.customer_item_name, i.pricelist_id,
@@ -363,7 +364,7 @@ SELECT * FROM (
 REQ_PENDING_SQL = """
 SELECT * FROM (
  SELECT r.id AS src_header_id, r.req_no AS src_no, r.req_date AS src_date, ri.id AS req_item_id, ri.product_id,
-        p.item_name, p.gst_rate, u.name AS uom, r.req_no AS indent_no,
+        p.item_name, p.gst_rate, u.name AS uom, r.req_no AS indent_no, p.enable_batch,
         ROUND(ri.qty - COALESCE((SELECT SUM(x.qty * COALESCE(x.factor, 1.0)) FROM txn_item x JOIN txn_header xh ON xh.id=x.header_id
                            WHERE x.req_item_id=ri.id AND xh.approval_status<>'Rejected' AND xh.id<>:excl),0), 3) AS pending_qty
  FROM requisition_item ri JOIN requisition r ON r.id=ri.requisition_id JOIN m_product p ON p.id=ri.product_id
@@ -416,11 +417,20 @@ def lot_balance(conn, barcode, godown_id, bin_no, exclude_header=0):
     return D(db.scalar(conn, "SELECT COALESCE(SUM(qty),0) FROM stock_ledger WHERE barcode=:b AND godown_id=:g "
                              "AND bin_no=:n AND header_id<>:h", b=barcode, g=godown_id, n=bin_no or "", h=exclude_header))
 
+def batch_balance(conn, product_id, batch_no, godown_id=None, exclude_header=0):
+    params = {"p": product_id, "b": batch_no, "h": exclude_header}
+    q = "SELECT COALESCE(SUM(qty), 0) FROM stock_ledger WHERE product_id=:p AND batch_no=:b AND header_id<>:h"
+    if godown_id:
+        q += " AND godown_id=:g"
+        params["g"] = godown_id
+    return D(db.scalar(conn, q, **params))
+
 def post_stock(conn, h, c):
     sign = c.get("stock", 0)
     if not sign:
         return
     need = {}
+    batch_need = {}
     for it in db.all_(conn, "SELECT * FROM txn_item WHERE header_id=:h", h=h["id"]):
         key = (it["barcode"], it["godown_id"], it["bin_no"] or "")
         if not it["barcode"] or not it["godown_id"]:
@@ -428,21 +438,30 @@ def post_stock(conn, h, c):
         factor = D(it.get("factor") or 1)
         base_qty = D(it["qty"]) * factor
         need[key] = need.get(key, 0) + base_qty
+        if it.get("batch_no"):
+            bkey = (it["product_id"], it["batch_no"], it["godown_id"])
+            batch_need[bkey] = batch_need.get(bkey, 0) + base_qty
         db.insert(conn, "stock_ledger", {"header_id": h["id"], "item_id": it["id"], "txn_date": h["voucher_date"],
                                          "product_id": it["product_id"], "barcode": it["barcode"], "godown_id": it["godown_id"],
-                                         "bin_no": it["bin_no"] or "", "qty": base_qty * sign,
+                                         "bin_no": it["bin_no"] or "", "batch_no": it.get("batch_no") or None, "qty": base_qty * sign,
                                          "txn_qty": D(it["qty"]) * sign, "uom_id": it.get("uom_id"), "factor": factor})
     if sign < 0:
         for (bc, gd, bn), q in need.items():
             if lot_balance(conn, bc, gd, bn) < 0:
                 raise ApiError(f"Not enough stock in barcode {bc} (godown/bin selected). Reduce the quantity.")
+        for (pid, bno, gd), q in batch_need.items():
+            if batch_balance(conn, pid, bno, godown_id=gd) < 0:
+                raise ApiError(f"Not enough stock in Batch '{bno}' (godown selected). Reduce the quantity.")
 
 def unpost_stock(conn, h):
-    rows = db.all_(conn, "SELECT barcode,godown_id,bin_no,SUM(qty) q FROM stock_ledger WHERE header_id=:h GROUP BY barcode,godown_id,bin_no", h=h["id"])
+    rows = db.all_(conn, "SELECT barcode,godown_id,bin_no,batch_no,product_id,SUM(qty) q FROM stock_ledger WHERE header_id=:h GROUP BY barcode,godown_id,bin_no,batch_no,product_id", h=h["id"])
     db.run(conn, "DELETE FROM stock_ledger WHERE header_id=:h", h=h["id"])
     for r in rows:
-        if D(r["q"]) > 0 and lot_balance(conn, r["barcode"], r["godown_id"], r["bin_no"]) < 0:
-            raise ApiError(f"Stock from barcode {r['barcode']} has already been used, so this can't be un-approved")
+        if D(r["q"]) > 0:
+            if lot_balance(conn, r["barcode"], r["godown_id"], r["bin_no"]) < 0:
+                raise ApiError(f"Stock from barcode {r['barcode']} has already been used, so this can't be un-approved")
+            if r.get("batch_no") and r.get("product_id") and batch_balance(conn, r["product_id"], r["batch_no"], godown_id=r["godown_id"]) < 0:
+                raise ApiError(f"Stock from Batch '{r['batch_no']}' has already been used, so this can't be un-approved")
 
 
 # ------------------------------------------------------------------ build / validate / save
@@ -497,9 +516,14 @@ def _clean_items(conn, doc, c, raw):
             "factor": factor,
             "primary_qty": primary_qty,
         }
-        for k in ("barcode", "bin_no", "description", "customer_item_name", "retailer_name", "ref_no", "indent_no"):
+        for k in ("barcode", "batch_no", "bin_no", "description", "customer_item_name", "retailer_name", "ref_no", "indent_no"):
             v = (r.get(k) or "").strip() if isinstance(r.get(k), str) else r.get(k)
             it[k] = v or None
+        is_batch_enabled = bool(db.scalar(conn, "SELECT enable_batch FROM m_product WHERE id=:p", p=pid))
+        if is_batch_enabled and (c.get("stock", 0) != 0 or doc in ("grn", "purchase", "challan", "sales", "purchase_return", "sales_return")):
+            if not it.get("batch_no"):
+                p_title = db.scalar(conn, "SELECT item_name FROM m_product WHERE id=:p", p=pid) or f"Product #{pid}"
+                raise ApiError(f"Line {n}: Batch number is required for batch-enabled product '{p_title}'", field="batch_no")
         for k in ("godown_id", "pricelist_id", "salesman_id", "broker_id", "src_header_id", "src_item_id", "req_item_id"):
             it[k] = int(r[k]) if r.get(k) else None
         it["delivery_date"] = str(r["delivery_date"])[:10] if r.get("delivery_date") else None
@@ -605,6 +629,18 @@ def _validate_stock_lines(conn, doc, c, h, items, hid):
             if tot_q > bal:
                 pname = db.scalar(conn, "SELECT item_name FROM m_product WHERE id=:p", p=pid) or bc
                 raise ApiError(f"Insufficient stock for {pname}! Available in stock: {bal}, Attempting to dispatch: {tot_q}. Stock cannot be negative.")
+        batch_totals = {}
+        for i in items:
+            if i.get("batch_no"):
+                b_key = (i["product_id"], i["batch_no"], i.get("godown_id"))
+                batch_totals[b_key] = batch_totals.get(b_key, Decimal(0)) + i["primary_qty"]
+        for (pid, bno, gid), tot_q in batch_totals.items():
+            pname = db.scalar(conn, "SELECT item_name FROM m_product WHERE id=:p", p=pid) or "Item"
+            bal = batch_balance(conn, pid, bno, godown_id=gid, exclude_header=hid or 0)
+            if bal <= 0:
+                raise ApiError(f"No stock available for {pname} (Batch: {bno}) in selected godown. Current batch stock is 0.")
+            if tot_q > bal:
+                raise ApiError(f"Insufficient stock for {pname} (Batch: {bno})! Available in stock: {bal}, Attempting to dispatch: {tot_q}. Batch stock cannot be negative.")
 
 def _validate_pricelist_controls(conn, doc, c, h, items, user_id, txn_type_id):
     if doc not in ("sales_order", "purchase_order"):

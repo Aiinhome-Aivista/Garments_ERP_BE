@@ -103,8 +103,10 @@ MASTERS = {
         table="m_product", label="Products", group="Products", icon="shirt", label_col="item_name", hook="product",
         help="The item name (SKU) is built from the product name and its attribute values.",
         fields=[
-            T("name", "Product Name", required=True, list=True),
-            dict(name="item_name", label="Item Name (sku)", type="readonly", list=True, unique=True),
+            dict(name="product_type", label="Product Type", type="radio",
+                 options=["Finished", "Semi-Finished", "Others"], default="Finished", required=True, list=True, full=True),
+            dict(name="name", label="Product Name", type="text", list=True),
+            dict(name="item_name", label="Item Name (sku)", type="readonly", list=True, unique=True, required=True),
             dict(name="category_id", label="Category", type="ref", ref="product_category", required=True, list=True),
             dict(name="group_id", label="Group", type="ref", ref="product_group", list=True),
             dict(name="uom_id", label="UOM", type="ref", ref="uom", required=True, list=True),
@@ -118,6 +120,8 @@ MASTERS = {
             dict(name="package_qty", label="Package Qty", type="decimal"),
             dict(name="min_stock", label="Minimum Stock Level", type="decimal",
                  help="Used by 'Requisition for PO' to suggest re-orders"),
+            dict(name="enable_batch", label="Enable Batch", type="toggle", default=0,
+                 help="Track stock batch-wise"),
         ],
         children=[
             dict(key="gst_slabs", table="m_product_gst_slab", fk="product_id", label="GST Slabs (Amount / Price Range Based)",

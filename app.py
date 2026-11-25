@@ -159,6 +159,14 @@ def bom_godowns():
 def bom_uoms():
     return masters_controller.get_uoms()
 
+@app.route('/api/masters/product/<int:pid>/multi-definition', methods=['GET'])
+def product_multi_definition(pid):
+    return masters_controller.get_product_multi_definition(pid)
+
+@app.route('/api/masters/product/bulk-create-from-existing', methods=['POST'])
+def product_bulk_create_from_existing():
+    return masters_controller.bulk_create_products_from_existing()
+
 @app.route('/api/masters/<key>/<int:rid>', methods=['GET'])
 def masters_get_(key, rid):
     return masters_controller.get_(key=key, rid=rid)
@@ -250,6 +258,18 @@ def stock_report():
 @app.route('/api/stock/balance', methods=['GET'])
 def stock_balance():
     return stock_controller.balance()
+
+@app.route('/api/stock/batches', methods=['GET'])
+def stock_batches():
+    return stock_controller.batches()
+
+@app.route('/api/stock/batch-report', methods=['GET'])
+def stock_batch_report():
+    return stock_controller.batch_report()
+
+@app.route('/api/stock/batch-history', methods=['GET'])
+def stock_batch_history():
+    return stock_controller.batch_history()
 
 @app.route('/api/vouchers/<doc>', methods=['GET'])
 def vouchers_list_(doc):
