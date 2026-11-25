@@ -300,7 +300,7 @@ def clean_fields(fields, data, label_prefix="", creating=True):
             v = None
         if v is None and f.get("required") and t != "bool":
             raise ApiError(f"{label_prefix}{f['label']} is required", field=n)
-        if t == "bool":
+        if t in ("bool", "toggle"):
             v = 1 if v else 0
         elif v is not None:
             if t in ("int",):
@@ -315,12 +315,12 @@ def clean_fields(fields, data, label_prefix="", creating=True):
                 except ValueError:
                     raise ApiError(f"{f['label']} is not a valid date", field=n)
                 v = str(v)[:10]
-            elif t == "select":
+            elif t in ("select", "radio"):
                 if f.get("options") and v not in f["options"]:
                     raise ApiError(f"{f['label']}: '{v}' is not an option", field=n)
             elif t == "attrs":
                 v = json.dumps(v if isinstance(v, dict) else {})
-        elif t == "select" and "" in (f.get("options") or []):
+        elif t in ("select", "radio") and "" in (f.get("options") or []):
             v = None
         if v is None and creating and "default" in f and n not in data:
             v = f["default"]
@@ -335,19 +335,41 @@ def _ean13(base12):
     return base12 + str((10 - s % 10) % 10)
 
 def _product_before(conn, data, payload, rid):
+    ptype = data.get("product_type") or payload.get("product_type") or "Finished"
+    name = (data.get("name") or "").strip()
+
     cat = data.get("category_id")
-    attrs = db.all_(conn, "SELECT attr_no,label FROM m_product_category_attr WHERE category_id=:c ORDER BY attr_no", c=cat)
+    attrs = db.all_(conn, "SELECT attr_no,label FROM m_product_category_attr WHERE category_id=:c ORDER BY attr_no", c=cat) if cat else []
     vals = json.loads(data.get("attr_values") or "{}")
-    parts = [data["name"]]
     clean = {}
+    attr_parts = []
     for a in attrs:
         v = str(vals.get(str(a["attr_no"])) or "").strip()
         if not v:
             raise ApiError(f"{a['label']} is required for this category", field="attr_values")
         clean[str(a["attr_no"])] = v
-        parts.append(v)
+        attr_parts.append(v)
     data["attr_values"] = json.dumps(clean)
-    data["item_name"] = "-".join(parts)
+
+    if attr_parts:
+        parts = attr_parts
+    else:
+        parts = []
+
+    if parts:
+        data["item_name"] = "-".join(parts)
+    else:
+        data["item_name"] = (payload.get("item_name") or "").strip()
+
+    if not data.get("item_name"):
+        raise ApiError("Item Name (sku) is required", field="item_name")
+
+    if ptype == "Others":
+        if not data.get("name"):
+            data["name"] = name
+    else:
+        if not data.get("name") or attr_parts:
+            data["name"] = data["item_name"]
 
     # Multi-UOM validation
     main_uom = data.get("uom_id")
@@ -789,6 +811,369 @@ def get_uoms():
     with db.tx() as conn:
         rows = db.all_(conn, "SELECT id, name FROM m_uom WHERE active = 1 ORDER BY name ASC")
         return jsonify(rows)
+
+
+@login_required
+def get_product_multi_definition(pid):
+    """Fetch base product's complete definitions: details, category attributes with master options,
+    alternate UOMs, GST slabs, Process definitions with nested materials, and standalone BOM if any."""
+    with db.tx() as conn:
+        p = db.one(conn, """
+            SELECT p.*,
+                   c.name as category_name,
+                   g.name as group_name,
+                   u.name as uom_name,
+                   sl.name as default_sales_ledger_name,
+                   pl.name as default_purchase_ledger_name
+            FROM m_product p
+            LEFT JOIN m_product_category c ON c.id = p.category_id
+            LEFT JOIN m_product_group g ON g.id = p.group_id
+            LEFT JOIN m_uom u ON u.id = p.uom_id
+            LEFT JOIN m_ledger sl ON sl.id = p.default_sales_ledger_id
+            LEFT JOIN m_ledger pl ON pl.id = p.default_purchase_ledger_id
+            WHERE p.id = :id
+        """, id=pid)
+        if not p:
+            raise ApiError("Base product not found", status=404)
+
+        # Parse attr_values if string
+        if isinstance(p.get("attr_values"), str):
+            try:
+                p["attr_values"] = json.loads(p["attr_values"])
+            except Exception:
+                p["attr_values"] = {}
+        elif not p.get("attr_values"):
+            p["attr_values"] = {}
+
+        # Fetch Category Attributes and options
+        cat_attrs = []
+        if p.get("category_id"):
+            attrs = db.all_(conn, """
+                SELECT attr_no, label, mode, generic_type_id
+                FROM m_product_category_attr
+                WHERE category_id = :c
+                ORDER BY attr_no
+            """, c=p["category_id"])
+            for a in attrs:
+                opts = []
+                t_id = a.get("generic_type_id")
+                if a.get("mode") == "List":
+                    if not t_id and a.get("label"):
+                        gt = db.one(conn, "SELECT id FROM m_generic_type WHERE LOWER(TRIM(name)) = LOWER(TRIM(:lbl))", lbl=a.get("label", ""))
+                        if gt:
+                            t_id = gt["id"]
+                    if t_id:
+                        opts = db.all_(conn, """
+                            SELECT id, name
+                            FROM m_generic
+                            WHERE type_id = :t AND active = 1
+                            ORDER BY name
+                        """, t=t_id)
+                cat_attrs.append({
+                    "attr_no": a["attr_no"],
+                    "label": a["label"],
+                    "mode": a["mode"],
+                    "generic_type_id": t_id,
+                    "options": opts,
+                    "current_value": p["attr_values"].get(str(a["attr_no"]))
+                })
+
+        # Alternate UOMs
+        alt_uoms = db.all_(conn, """
+            SELECT u.id, u.uom_id, um.name as uom_name, u.conversion_factor
+            FROM m_product_uom u
+            JOIN m_uom um ON um.id = u.uom_id
+            WHERE u.product_id = :pid
+        """, pid=pid)
+
+        # GST Slabs
+        gst_slabs = db.all_(conn, """
+            SELECT id, min_price, max_price, gst_rate
+            FROM m_product_gst_slab
+            WHERE product_id = :pid
+            ORDER BY min_price
+        """, pid=pid)
+
+        # Process Definitions with materials
+        procs = db.all_(conn, """
+            SELECT pp.id, pp.process_id, pr.name as process_name, pp.seq,
+                   pp.uom_id, u.name as uom_name, pp.qty, pp.qty as unit_qty,
+                   pp.process_rate, pp.overhead_pct, pp.out_status
+            FROM m_product_process pp
+            JOIN m_process pr ON pr.id = pp.process_id
+            LEFT JOIN m_uom u ON u.id = pp.uom_id
+            WHERE pp.product_id = :pid
+            ORDER BY pp.seq, pp.id
+        """, pid=pid)
+
+        for pr in procs:
+            pr["process_id__label"] = pr.get("process_name") or f"Process #{pr.get('process_id')}"
+            mats = db.all_(conn, """
+                SELECT ppm.id, ppm.material_id, p.item_name as material_name, p.item_name as material_id__label,
+                       ppm.godown_id, g.name as godown_name, g.name as godown_id__label, ppm.item_type,
+                       ppm.qty_per_unit, ppm.uom_id, u.name as uom_name, u.name as uom_id__label,
+                       ppm.rate, ppm.rate_pct, ppm.seq,
+                       ROUND(ppm.qty_per_unit * COALESCE(ppm.rate, 0), 2) as amount
+                FROM m_product_process_material ppm
+                JOIN m_product p ON p.id = ppm.material_id
+                LEFT JOIN m_godown g ON g.id = ppm.godown_id
+                JOIN m_uom u ON u.id = ppm.uom_id
+                WHERE ppm.product_process_id = :pp
+                ORDER BY ppm.seq, ppm.id
+            """, pp=pr["id"])
+            pr["materials"] = mats
+
+        # Standalone BOM details if any
+        bom = db.one(conn, """
+            SELECT b.id, b.bom_no, b.bom_name, b.product_id, b.batch_qty, b.uom_id, u.name as uom_name, b.remarks
+            FROM m_bom b
+            LEFT JOIN m_uom u ON u.id = b.uom_id
+            WHERE b.product_id = :pid
+            ORDER BY b.id DESC LIMIT 1
+        """, pid=pid)
+        if bom:
+            bom_items = db.all_(conn, """
+                SELECT bi.id, bi.material_id, p.item_name as material_name,
+                       bi.godown_id, g.name as godown_name, bi.item_type,
+                       bi.qty_per_unit, bi.rate, bi.wastage_pct, bi.remarks,
+                       p.uom_id, u.name as uom_name,
+                       ROUND(bi.qty_per_unit * COALESCE(bi.rate, 0), 2) as amount
+                FROM m_bom_item bi
+                JOIN m_product p ON p.id = bi.material_id
+                LEFT JOIN m_godown g ON g.id = bi.godown_id
+                LEFT JOIN m_uom u ON u.id = p.uom_id
+                WHERE bi.bom_id = :bid
+                ORDER BY bi.seq, bi.id
+            """, bid=bom["id"])
+            bom["items"] = bom_items
+
+        return jsonify({
+            "product": p,
+            "category_attributes": cat_attrs,
+            "alternate_uoms": alt_uoms,
+            "gst_slabs": gst_slabs,
+            "processes": procs,
+            "bom": bom
+        })
+
+
+@login_required
+def bulk_create_products_from_existing():
+    """Bulk create multiple product combinations from an existing product in a single transaction."""
+    payload = request.get_json(force=True) or {}
+    base_product_id = payload.get("base_product_id")
+    common_fields = payload.get("common_fields") or {}
+    items = payload.get("items") or []
+    alternate_uoms = payload.get("alternate_uoms") or []
+    gst_slabs = payload.get("gst_slabs") or []
+    processes = payload.get("processes") or []
+    bom = payload.get("bom")
+
+    if not base_product_id:
+        raise ApiError("Base product ID is required", field="base_product_id")
+    if not items:
+        raise ApiError("At least one product combination must be provided", field="items")
+
+    items_to_create = [it for it in items if not it.get("is_base")]
+    if not items_to_create:
+        raise ApiError("At least one new product line must be provided", field="items")
+
+    # Clean & validate item names
+    item_names = []
+    for idx, it in enumerate(items_to_create, 1):
+        name = (it.get("item_name") or "").strip()
+        if not name:
+            raise ApiError(f"Combination row {idx}: Item Name (SKU) cannot be empty")
+        item_names.append(name)
+
+    # Check for duplicates within the request
+    if len(item_names) != len(set(item_names)):
+        seen = set()
+        dupes = set()
+        for name in item_names:
+            if name in seen:
+                dupes.add(name)
+            seen.add(name)
+        raise ApiError(f"Duplicate SKUs in generated list: {', '.join(dupes)}")
+
+    with db.tx() as conn:
+        # Check base product exists
+        base_prod = db.one(conn, "SELECT id, item_name FROM m_product WHERE id=:id", id=base_product_id)
+        if not base_prod:
+            raise ApiError("Selected base product does not exist")
+
+        # Check for existing duplicate SKUs in database
+        existing_dupes = []
+        for name in item_names:
+            if db.scalar(conn, "SELECT COUNT(*) FROM m_product WHERE item_name = :n", n=name):
+                existing_dupes.append(name)
+        if existing_dupes:
+            raise ApiError(f"The following SKUs already exist in the database: {', '.join(existing_dupes[:5])}{'...' if len(existing_dupes) > 5 else ''}")
+
+        created_products = []
+
+        for it in items_to_create:
+            p_type = it.get("product_type") or common_fields.get("product_type") or "Finished"
+            prod_name = (it.get("name") or common_fields.get("name") or it.get("item_name") or "").strip()
+            item_name = it["item_name"].strip()
+            attr_values = it.get("attr_values") or {}
+            attr_json = json.dumps(attr_values)
+
+            # Insert into m_product
+            p_data = {
+                "product_type": p_type,
+                "name": prod_name if prod_name else item_name,
+                "item_name": item_name,
+                "category_id": common_fields.get("category_id"),
+                "group_id": common_fields.get("group_id"),
+                "uom_id": common_fields.get("uom_id"),
+                "default_sales_ledger_id": common_fields.get("default_sales_ledger_id"),
+                "default_purchase_ledger_id": common_fields.get("default_purchase_ledger_id"),
+                "gst_type": common_fields.get("gst_type") or "Flat",
+                "gst_rate": Decimal(str(common_fields.get("gst_rate") or 0)),
+                "hsn_code": common_fields.get("hsn_code"),
+                "package_qty": common_fields.get("package_qty"),
+                "min_stock": common_fields.get("min_stock"),
+                "enable_batch": 1 if common_fields.get("enable_batch") else 0,
+                "active": 1,
+                "attr_values": attr_json
+            }
+            new_pid = db.insert(conn, "m_product", p_data)
+
+            # Barcode generation
+            barcode = _ean13(f"200{new_pid:09d}")
+            db.run(conn, "UPDATE m_product SET barcode=:b WHERE id=:i", b=barcode, i=new_pid)
+
+            # Clone Alternate UOMs
+            for au in alternate_uoms:
+                auid = au.get("uom_id")
+                cf = au.get("conversion_factor")
+                if auid and cf:
+                    db.insert(conn, "m_product_uom", {
+                        "product_id": new_pid,
+                        "uom_id": int(auid),
+                        "conversion_factor": Decimal(str(cf))
+                    })
+
+            # Clone GST Slabs
+            if p_data["gst_type"] == "Slab":
+                for sl in gst_slabs:
+                    min_p = sl.get("min_price")
+                    max_p = sl.get("max_price")
+                    gr = sl.get("gst_rate")
+                    if min_p is not None and gr is not None:
+                        db.insert(conn, "m_product_gst_slab", {
+                            "product_id": new_pid,
+                            "min_price": Decimal(str(min_p)),
+                            "max_price": Decimal(str(max_p)) if max_p not in (None, "", "null") else None,
+                            "gst_rate": Decimal(str(gr))
+                        })
+
+            # Clone Processes & Process Materials (use item's specific processes if provided, else fallback to common processes)
+            item_procs = it.get("processes") if it.get("processes") is not None else processes
+            for p_idx, pr in enumerate(item_procs, 1):
+                proc_id = pr.get("process_id")
+                if not proc_id:
+                    continue
+                pp_id = db.insert(conn, "m_product_process", {
+                    "product_id": new_pid,
+                    "process_id": int(proc_id),
+                    "components_of_id": new_pid,
+                    "seq": int(pr.get("seq") or p_idx),
+                    "uom_id": pr.get("uom_id"),
+                    "qty": Decimal(str(pr.get("qty") or pr.get("unit_qty") or 1)),
+                    "process_rate": Decimal(str(pr.get("process_rate") or 0)),
+                    "overhead_pct": Decimal(str(pr.get("overhead_pct") or 0)),
+                    "out_status": pr.get("out_status") or "WIP"
+                })
+
+                mats = pr.get("materials") or []
+                for m_idx, mat in enumerate(mats, 1):
+                    mid = mat.get("material_id")
+                    if not mid:
+                        continue
+                    db.insert(conn, "m_product_process_material", {
+                        "product_process_id": pp_id,
+                        "material_id": int(mid),
+                        "godown_id": int(mat["godown_id"]) if mat.get("godown_id") else None,
+                        "item_type": mat.get("item_type") or "Raw Material",
+                        "qty_per_unit": Decimal(str(mat.get("qty_per_unit") or 0)),
+                        "uom_id": int(mat.get("uom_id") or p_data["uom_id"]),
+                        "rate": Decimal(str(mat.get("rate") or 0)),
+                        "rate_pct": Decimal(str(mat.get("rate_pct") or 0)),
+                        "seq": m_idx
+                    })
+
+            # Clone Standalone BOM if provided, or auto-generate m_bom from processes materials
+            all_process_mats = []
+            for pr in item_procs:
+                for m in (pr.get("materials") or []):
+                    if m.get("material_id"):
+                        all_process_mats.append(m)
+
+            if bom and bom.get("items"):
+                bitems = bom.get("items") or []
+                valid_bitems = [bi for bi in bitems if bi.get("material_id")]
+                if valid_bitems:
+                    new_bno = _generate_bom_no(conn)
+                    bname = f"{item_name} BOM"
+                    bid = db.insert(conn, "m_bom", {
+                        "bom_no": new_bno,
+                        "bom_name": bname,
+                        "product_id": new_pid,
+                        "batch_qty": Decimal(str(bom.get("batch_qty") or 1)),
+                        "uom_id": int(bom.get("uom_id") or p_data["uom_id"]),
+                        "remarks": bom.get("remarks") or ""
+                    })
+                    for bi_idx, bi in enumerate(valid_bitems, 1):
+                        db.insert(conn, "m_bom_item", {
+                            "bom_id": bid,
+                            "material_id": int(bi["material_id"]),
+                            "godown_id": int(bi["godown_id"]) if bi.get("godown_id") else None,
+                            "item_type": bi.get("item_type") or "Raw Material",
+                            "qty_per_unit": Decimal(str(bi.get("qty_per_unit") or 0)),
+                            "uom_id": int(bi.get("uom_id") or p_data["uom_id"]),
+                            "rate": Decimal(str(bi.get("rate") or 0)),
+                            "wastage_pct": Decimal(str(bi.get("wastage_pct") or 0)),
+                            "seq": bi_idx,
+                            "remarks": bi.get("remarks") or ""
+                        })
+            elif all_process_mats:
+                new_bno = _generate_bom_no(conn)
+                bname = f"{item_name} BOM"
+                bid = db.insert(conn, "m_bom", {
+                    "bom_no": new_bno,
+                    "bom_name": bname,
+                    "product_id": new_pid,
+                    "batch_qty": Decimal("1"),
+                    "uom_id": int(p_data["uom_id"]),
+                    "remarks": "Auto-created from processes BOM"
+                })
+                for bi_idx, m in enumerate(all_process_mats, 1):
+                    db.insert(conn, "m_bom_item", {
+                        "bom_id": bid,
+                        "material_id": int(m["material_id"]),
+                        "godown_id": int(m["godown_id"]) if m.get("godown_id") else None,
+                        "item_type": m.get("item_type") or "Raw Material",
+                        "qty_per_unit": Decimal(str(m.get("qty_per_unit") or 0)),
+                        "uom_id": int(m.get("uom_id") or p_data["uom_id"]),
+                        "rate": Decimal(str(m.get("rate") or 0)),
+                        "wastage_pct": Decimal(str(m.get("rate_pct") or 0)),
+                        "seq": bi_idx,
+                        "remarks": ""
+                    })
+
+            created_products.append({
+                "id": new_pid,
+                "item_name": item_name,
+                "barcode": barcode
+            })
+
+        return jsonify({
+            "success": True,
+            "count": len(created_products),
+            "products": created_products
+        })
 
 
 

@@ -28,10 +28,11 @@ def resolve(conn, party_id, product_id, on_date):
     }
     if not product_id:
         return out
-    prod = db.one(conn, "SELECT p.group_id, p.gst_type, p.gst_rate, p.uom_id, u.name uom_name, u.decimals, u.allow_fraction "
+    prod = db.one(conn, "SELECT p.group_id, p.gst_type, p.gst_rate, p.uom_id, u.name uom_name, u.decimals, u.allow_fraction, p.enable_batch "
                         "FROM m_product p JOIN m_uom u ON u.id=p.uom_id WHERE p.id=:i", i=product_id)
     if not prod:
         return out
+    out["enable_batch"] = bool(prod.get("enable_batch"))
     gst_type = prod.get("gst_type") or "Flat"
     out["gst_type"] = gst_type
     out["gst_rate"] = float(prod.get("gst_rate") or 0)
